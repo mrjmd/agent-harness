@@ -48,6 +48,30 @@ CLAUDE_MD_PATH = Path(".claude/CLAUDE.md")
 MAX_RETRIES_PER_FEATURE = 5
 MAX_ITERATIONS_PER_FEATURE = 20
 
+# XML-style delimiters for prompt injection protection
+XML_DELIMITERS = {
+    "context_start": "<|TASK_CONTEXT|>",
+    "context_end": "</|TASK_CONTEXT|>",
+    "history_start": "<|ITERATION_HISTORY|>",
+    "history_end": "</|ITERATION_HISTORY|>",
+    "feedback_start": "<|HARNESS_FEEDBACK|>",
+    "feedback_end": "</|HARNESS_FEEDBACK|>",
+    "instructions_start": "<|INSTRUCTIONS|>",
+    "instructions_end": "</|INSTRUCTIONS|>",
+}
+
+
+def sanitize_input(text: str) -> str:
+    """
+    Sanitize text to prevent delimiter injection.
+
+    Escapes any strings that look like our delimiters.
+    """
+    for delimiter in XML_DELIMITERS.values():
+        escaped = delimiter.replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(delimiter, escaped)
+    return text
+
 
 @dataclass
 class IterationRecord:
@@ -102,40 +126,39 @@ def format_conversation(context: str, history: list, current_feedback: str = "")
 
     Since CLI takes a single string (not a messages array), we concatenate
     the context, history, and any current feedback.
+
+    Uses XML-style delimiters to prevent prompt injection attacks.
     """
     parts = []
 
     # Initial context (includes constitution, repo map, feature spec)
-    parts.append("=" * 60)
-    parts.append("TASK CONTEXT")
-    parts.append("=" * 60)
-    parts.append(context)
+    parts.append(XML_DELIMITERS["context_start"])
+    parts.append(sanitize_input(context))
+    parts.append(XML_DELIMITERS["context_end"])
     parts.append("")
 
     # Conversation history (previous iterations and feedback)
     if history:
-        parts.append("=" * 60)
-        parts.append("PREVIOUS ITERATIONS")
-        parts.append("=" * 60)
+        parts.append(XML_DELIMITERS["history_start"])
         for entry in history:
             if entry.get("type") == "response":
-                parts.append(f"\n[YOUR PREVIOUS RESPONSE]\n{entry['content'][:2000]}")
+                content = sanitize_input(entry['content'][:2000])
+                parts.append(f"\n<|AGENT_RESPONSE|>\n{content}\n</|AGENT_RESPONSE|>")
             elif entry.get("type") == "feedback":
-                parts.append(f"\n[HARNESS FEEDBACK]\n{entry['content']}")
+                content = sanitize_input(entry['content'])
+                parts.append(f"\n<|FEEDBACK|>\n{content}\n</|FEEDBACK|>")
+        parts.append(XML_DELIMITERS["history_end"])
         parts.append("")
 
     # Current feedback (if any)
     if current_feedback:
-        parts.append("=" * 60)
-        parts.append("CURRENT FEEDBACK")
-        parts.append("=" * 60)
-        parts.append(current_feedback)
+        parts.append(XML_DELIMITERS["feedback_start"])
+        parts.append(sanitize_input(current_feedback))
+        parts.append(XML_DELIMITERS["feedback_end"])
         parts.append("")
 
     # Instructions
-    parts.append("=" * 60)
-    parts.append("INSTRUCTIONS")
-    parts.append("=" * 60)
+    parts.append(XML_DELIMITERS["instructions_start"])
     parts.append("""
 Work on the feature described above. Follow TDD:
 1. Write a failing test first (in tests/e2e/)
@@ -144,6 +167,7 @@ Work on the feature described above. Follow TDD:
 
 The harness will verify your work externally. If tests fail, you'll receive feedback.
 """)
+    parts.append(XML_DELIMITERS["instructions_end"])
 
     return "\n".join(parts)
 

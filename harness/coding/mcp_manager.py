@@ -56,7 +56,11 @@ class MCPManager:
         if not config_path.exists():
             raise FileNotFoundError(f"MCP config not found: {config_path}")
 
-        config = json.loads(config_path.read_text())
+        try:
+            config = json.loads(config_path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in MCP config {config_path}: {e}")
+
         manager = cls()
 
         mcp_servers = config.get("mcpServers", {})
@@ -225,7 +229,13 @@ class MCPManager:
             return {}
 
         content = process.stdout.read(content_length)
-        return json.loads(content.decode("utf-8"))
+        try:
+            return json.loads(content.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"Warning: Invalid JSON from MCP server: {content[:200]}...")
+            return {"error": {"code": -32700, "message": f"Parse error: {e}"}}
+        except UnicodeDecodeError as e:
+            return {"error": {"code": -32700, "message": f"Encoding error: {e}"}}
 
     def get_all_tools(self) -> list[dict]:
         """Get all tool definitions for the Anthropic API."""

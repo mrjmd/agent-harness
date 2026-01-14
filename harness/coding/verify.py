@@ -13,11 +13,50 @@ This catches:
 """
 
 import json
+import shlex
 import subprocess
 import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+
+
+# Configuration path
+CONFIG_PATH = Path(".claude/config.json")
+
+
+def load_test_config() -> tuple[list[str], int]:
+    """
+    Load test command and timeout from config.json.
+
+    Returns:
+        Tuple of (command_args: list[str], timeout_seconds: int)
+        Falls back to defaults if config missing or invalid.
+    """
+    # Defaults
+    default_cmd = ["npx", "playwright", "test"]
+    default_timeout = 120
+
+    if not CONFIG_PATH.exists():
+        return default_cmd, default_timeout
+
+    try:
+        config = json.loads(CONFIG_PATH.read_text())
+        settings = config.get("settings", {})
+
+        # Parse test command - handles quoted strings properly
+        test_cmd_str = settings.get("testCommand", "npx playwright test")
+        test_cmd = shlex.split(test_cmd_str)
+
+        # Parse timeout (config is in ms, convert to seconds)
+        timeout_ms = settings.get("testTimeout", 120000)
+        timeout_sec = max(10, timeout_ms // 1000)  # Minimum 10 seconds
+
+        return test_cmd, timeout_sec
+
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"Warning: Could not load test config: {e}. Using defaults.")
+        return default_cmd, default_timeout
 
 
 @dataclass
@@ -64,27 +103,30 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
         )
 
     # Step 2: THE HARNESS RUNS THE TEST (not the agent!)
+    base_cmd, timeout = load_test_config()
+    full_cmd = base_cmd + [str(test_file), "--reporter=list"]
+
     try:
         result = subprocess.run(
-            ["npx", "playwright", "test", str(test_file), "--reporter=list"],
+            full_cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
             cwd=Path.cwd()
         )
     except subprocess.TimeoutExpired:
         return VerificationResult(
             passed=False,
-            reason="Test timed out (120s limit)",
+            reason=f"Test timed out ({timeout}s limit)",
             test_file=str(test_file),
-            stderr="Test execution exceeded 120 second timeout"
+            stderr=f"Test execution exceeded {timeout} second timeout"
         )
     except FileNotFoundError:
         return VerificationResult(
             passed=False,
-            reason="Playwright not installed",
+            reason="Test runner not found",
             test_file=str(test_file),
-            stderr="npx playwright not found. Run: npm install -D @playwright/test"
+            stderr=f"Command not found: {' '.join(base_cmd)}. Check your config."
         )
 
     tests_pass = result.returncode == 0
@@ -142,25 +184,30 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
     Returns:
         RegressionResult with pass/fail and list of broken tests
     """
+    base_cmd, single_timeout = load_test_config()
+    # For regression, use 5x single test timeout, capped at 10 minutes
+    regression_timeout = min(single_timeout * 5, 600)
+    full_cmd = base_cmd + ["--reporter=list"]
+
     try:
         result = subprocess.run(
-            ["npx", "playwright", "test", "--reporter=list"],
+            full_cmd,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 min for full suite
+            timeout=regression_timeout,
             cwd=Path.cwd()
         )
     except subprocess.TimeoutExpired:
         return RegressionResult(
             passed=False,
             failed_tests=["TIMEOUT"],
-            output="Full test suite exceeded 5 minute timeout"
+            output=f"Full test suite exceeded {regression_timeout}s timeout"
         )
     except FileNotFoundError:
         return RegressionResult(
             passed=False,
-            failed_tests=["PLAYWRIGHT_NOT_FOUND"],
-            output="npx playwright not found"
+            failed_tests=["TEST_RUNNER_NOT_FOUND"],
+            output=f"Command not found: {' '.join(base_cmd)}"
         )
 
     if result.returncode == 0:

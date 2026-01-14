@@ -37,6 +37,10 @@ TECH_PLAN_PATH = SPECS_DIR / "tech_plan.md"
 # Gate definitions
 GATES = ["problem", "solution", "technical", "edges", "synthesis", "complete"]
 
+# Context window management
+MAX_HISTORY_MESSAGES = 20  # Keep at most this many recent messages verbatim
+SUMMARY_TRIGGER_COUNT = 25  # Summarize when messages exceed this count
+
 
 # =============================================================================
 # CLI Wrapper
@@ -70,45 +74,146 @@ def call_claude_cli(prompt_text: str) -> str:
         sys.exit(1)
 
 
+# XML-style delimiters for injection protection
+XML_DELIMITERS = {
+    "system_start": "<|SYSTEM_INSTRUCTIONS|>",
+    "system_end": "</|SYSTEM_INSTRUCTIONS|>",
+    "history_start": "<|CONVERSATION_HISTORY|>",
+    "history_end": "</|CONVERSATION_HISTORY|>",
+    "user_start": "<|USER_INPUT|>",
+    "user_end": "</|USER_INPUT|>",
+    "response_start": "<|ASSISTANT_RESPONSE|>",
+}
+
+
+def sanitize_user_input(text: str) -> str:
+    """
+    Sanitize user input to prevent delimiter injection.
+
+    Escapes any strings that look like our delimiters and flags suspicious patterns.
+    """
+    # Escape our delimiter patterns
+    for delimiter in XML_DELIMITERS.values():
+        escaped = delimiter.replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(delimiter, escaped)
+
+    # Flag common injection patterns (but don't block - could be legitimate)
+    injection_patterns = [
+        "SYSTEM INSTRUCTIONS",
+        "IGNORE PREVIOUS",
+        "NEW INSTRUCTIONS",
+        "DISREGARD",
+    ]
+    for pattern in injection_patterns:
+        if pattern.upper() in text.upper():
+            text = f"[NOTE: Input contained pattern '{pattern}']\n{text}"
+            break
+
+    return text
+
+
 def format_conversation(system: str, messages: list, current_input: str) -> str:
     """
-    Format full conversation for CLI input.
+    Format full conversation for CLI input with injection protection.
 
-    Since CLI takes a single string (not a messages array),
-    we concatenate system prompt and history into one formatted block.
+    Uses XML-style delimiters that are harder to forge than plain text markers.
     """
     parts = []
 
-    # System prompt
-    parts.append("=" * 60)
-    parts.append("SYSTEM INSTRUCTIONS")
-    parts.append("=" * 60)
+    # System prompt with secure delimiters
+    parts.append(XML_DELIMITERS["system_start"])
     parts.append(system)
+    parts.append(XML_DELIMITERS["system_end"])
     parts.append("")
 
-    # Conversation history
+    # Conversation history with role markers
     if messages:
-        parts.append("=" * 60)
-        parts.append("CONVERSATION HISTORY")
-        parts.append("=" * 60)
+        parts.append(XML_DELIMITERS["history_start"])
         for msg in messages:
-            role = msg["role"].upper()
-            content = msg["content"]
-            parts.append(f"\n[{role}]")
+            role = msg.get("role", "unknown").upper()
+            content = msg.get("content", "")
+            # Sanitize historical content too (could contain injections)
+            content = sanitize_user_input(content)
+            parts.append(f"\n<|{role}|>")
             parts.append(content)
+            parts.append(f"</|{role}|>")
+        parts.append(XML_DELIMITERS["history_end"])
         parts.append("")
 
-    # Current input
-    parts.append("=" * 60)
-    parts.append("CURRENT USER INPUT")
-    parts.append("=" * 60)
-    parts.append(current_input)
+    # Current user input - sanitized
+    parts.append(XML_DELIMITERS["user_start"])
+    parts.append(sanitize_user_input(current_input))
+    parts.append(XML_DELIMITERS["user_end"])
     parts.append("")
-    parts.append("=" * 60)
-    parts.append("YOUR RESPONSE (as the Socratic Architect):")
-    parts.append("=" * 60)
+
+    # Response marker
+    parts.append(XML_DELIMITERS["response_start"])
+    parts.append("(Your response as the Socratic Architect)")
 
     return "\n".join(parts)
+
+
+# =============================================================================
+# Context Window Management
+# =============================================================================
+
+def summarize_history(messages: list) -> list:
+    """
+    Summarize conversation history when it exceeds SUMMARY_TRIGGER_COUNT.
+
+    Keeps the most recent MAX_HISTORY_MESSAGES verbatim and summarizes
+    older messages into bullet points.
+
+    Args:
+        messages: Full conversation history
+
+    Returns:
+        Condensed message list with summary prefix
+    """
+    if len(messages) <= SUMMARY_TRIGGER_COUNT:
+        return messages
+
+    print("(Summarizing conversation history...)")
+
+    # Split into old (to summarize) and recent (to keep)
+    split_point = len(messages) - MAX_HISTORY_MESSAGES
+    old_messages = messages[:split_point]
+    recent_messages = messages[split_point:]
+
+    # Build summary prompt
+    summary_input = []
+    for msg in old_messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")[:500]  # Truncate long messages
+        summary_input.append(f"{role.upper()}: {content}")
+
+    summary_prompt = f"""Summarize the following conversation history into 5-10 bullet points.
+Focus on: decisions made, key requirements discovered, blockers identified.
+
+CONVERSATION:
+{chr(10).join(summary_input)}
+
+SUMMARY (bullet points only):"""
+
+    try:
+        summary = call_claude_cli(summary_prompt)
+
+        # Create a summary message to prepend
+        summary_message = {
+            "role": "system",
+            "content": f"[CONVERSATION SUMMARY - {len(old_messages)} messages condensed]\n{summary}"
+        }
+
+        return [summary_message] + recent_messages
+
+    except Exception as e:
+        print(f"Warning: Summarization failed ({e}), using truncation fallback")
+        # Fallback: just truncate with a marker
+        truncation_marker = {
+            "role": "system",
+            "content": f"[{len(old_messages)} earlier messages truncated for context management]"
+        }
+        return [truncation_marker] + recent_messages
 
 
 # =============================================================================
@@ -658,6 +763,10 @@ def run_repl(state: SpecificationState) -> None:
             # Add to history
             state.messages.append({"role": "user", "content": user_input})
             state.messages.append({"role": "assistant", "content": assistant_message})
+
+            # Context window management - summarize if too long
+            if len(state.messages) > SUMMARY_TRIGGER_COUNT:
+                state.messages = summarize_history(state.messages)
 
             # Print response
             print(f"\nArchitect: {assistant_message}")
