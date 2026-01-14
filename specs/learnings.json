@@ -1,0 +1,51 @@
+{
+  "learnings": [],
+  "_schema": {
+    "learning": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier (e.g., learn-feature-id-1)"
+      },
+      "timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "When the lesson was learned"
+      },
+      "feature_id": {
+        "type": "string",
+        "description": "Which feature this lesson came from"
+      },
+      "category": {
+        "type": "string",
+        "enum": ["api_gotcha", "package_issue", "pattern", "environment", "test_insight", "other"],
+        "description": "Category of the lesson"
+      },
+      "lesson": {
+        "type": "string",
+        "description": "The actual lesson learned (specific and actionable)"
+      },
+      "context": {
+        "type": "string",
+        "description": "Additional context about when/why this matters"
+      }
+    }
+  },
+  "_examples": [
+    {
+      "id": "learn-auth-001-1",
+      "timestamp": "2026-01-13T15:30:00Z",
+      "feature_id": "auth-001",
+      "category": "api_gotcha",
+      "lesson": "Playwright page.goto() requires full URL with protocol",
+      "context": "Was passing '/login' but needed 'http://localhost:3000/login'"
+    },
+    {
+      "id": "learn-setup-002-1",
+      "timestamp": "2026-01-13T16:00:00Z",
+      "feature_id": "setup-002",
+      "category": "package_issue",
+      "lesson": "Next.js 15 app router uses page.tsx not page.js by default",
+      "context": "Check existing project conventions before creating new files"
+    }
+  ]
+}

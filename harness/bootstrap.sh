@@ -64,17 +64,27 @@ mkdir -p .claude harness/templates specs tests/e2e
 cp -r "$HARNESS_ROOT/.claude/"* .claude/ 2>/dev/null || true
 log_success "Copied .claude/"
 
-# Copy harness directory (excluding bootstrap.sh itself to avoid confusion)
+# Copy harness directory (all Python modules)
 cp "$HARNESS_ROOT/harness/loop.py" harness/
+cp "$HARNESS_ROOT/harness/mcp_manager.py" harness/
+cp "$HARNESS_ROOT/harness/verify.py" harness/
+cp "$HARNESS_ROOT/harness/git_utils.py" harness/
+cp "$HARNESS_ROOT/harness/repo_map.py" harness/
+cp "$HARNESS_ROOT/harness/reflection.py" harness/
 cp -r "$HARNESS_ROOT/harness/templates/"* harness/templates/ 2>/dev/null || true
 log_success "Copied harness/"
 
-# Copy specs template if specs is empty
+# Copy specs templates
 if [[ ! -f "specs/features.json" ]]; then
     cp "$HARNESS_ROOT/harness/templates/features.json" specs/features.json
     log_success "Initialized specs/features.json"
 else
     log_warn "specs/features.json already exists, skipping"
+fi
+
+if [[ ! -f "specs/learnings.json" ]]; then
+    cp "$HARNESS_ROOT/specs/learnings.json" specs/learnings.json
+    log_success "Initialized specs/learnings.json"
 fi
 
 # Initialize git if not already
@@ -140,6 +150,13 @@ npm install --save-dev @anthropic-ai/mcp-server-playwright @anthropic-ai/mcp-ser
     log_warn "Some MCP servers failed to install (they may not be published yet)"
 }
 
+# Install Python dependencies
+log_info "Installing Python dependencies..."
+pip3 install anthropic --quiet 2>/dev/null || pip install anthropic --quiet 2>/dev/null || {
+    log_warn "Could not install anthropic SDK. Run: pip install anthropic"
+}
+log_success "Python dependencies installed"
+
 # Create Playwright config if missing
 if [[ ! -f "playwright.config.ts" ]]; then
     log_info "Creating Playwright configuration..."
@@ -184,13 +201,26 @@ log_success "Agent Harness installed successfully!"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "  1. Edit specs/features.json to define your features"
-echo "  2. Run: python3 harness/loop.py"
+echo "  1. Set ANTHROPIC_API_KEY environment variable"
+echo "  2. Edit specs/features.json to define your features"
+echo "  3. Run: python3 harness/loop.py"
 echo ""
 echo "Files created:"
-echo "  .claude/CLAUDE.md      - Agent constitution"
-echo "  .claude/config.json    - MCP server configuration"
-echo "  harness/loop.py        - The autonomous loop script"
-echo "  specs/features.json    - Your feature backlog"
-echo "  playwright.config.ts   - Playwright configuration"
+echo "  .claude/CLAUDE.md       - Agent constitution"
+echo "  .claude/config.json     - MCP server configuration"
+echo "  harness/loop.py         - Main orchestration loop"
+echo "  harness/mcp_manager.py  - MCP server lifecycle"
+echo "  harness/verify.py       - External test verification"
+echo "  harness/git_utils.py    - Git checkpoint/rollback"
+echo "  harness/repo_map.py     - Codebase structure mapping"
+echo "  harness/reflection.py   - Knowledge transfer"
+echo "  specs/features.json     - Feature backlog"
+echo "  specs/learnings.json    - Accumulated lessons"
+echo "  playwright.config.ts    - Playwright configuration"
+echo ""
+echo "Key features:"
+echo "  - External verification: Harness runs tests, not the agent"
+echo "  - Git checkpoints: Commit on green, rollback on red"
+echo "  - Regression fence: All tests must pass before feature completes"
+echo "  - Reflection: Lessons learned persist for future agents"
 echo ""

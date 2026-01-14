@@ -1,51 +1,105 @@
 #!/usr/bin/env python3
 """
-Autonomous Agent Loop - The Brain
+Autonomous Agent Loop - MCP-Native Implementation
 
-This script orchestrates the Plan -> Test -> Code cycle by:
-1. Reading specs/features.json for the current backlog
-2. Finding the next actionable feature (todo or failing)
-3. Prompting Claude to implement it via TDD
-4. Looping until all features pass
+This script orchestrates the Plan -> Test -> Code cycle with:
+1. MCP server integration for real tool execution
+2. External verification (harness runs tests, not agent)
+3. Git checkpoints (commit on green, reset on red)
+4. Regression fence (all tests must pass)
+5. Repository map for brownfield safety
+6. Reflection for knowledge transfer
+
+The key insight: Claude actually executes tools through MCP servers,
+not just talking about what it would do.
 """
 
 import json
-import subprocess
 import sys
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass, field
 
-# Try to import anthropic SDK, fall back to CLI if not available
+# Local modules
+from mcp_manager import MCPManager
+from verify import (
+    verify_feature,
+    regression_check,
+    claims_completion,
+    format_verification_feedback,
+    format_regression_feedback
+)
+from git_utils import (
+    get_status,
+    create_checkpoint,
+    commit_feature,
+    rollback,
+    ensure_repo
+)
+from repo_map import build_feature_context
+from reflection import run_reflection, save_learnings
+
+# Anthropic SDK
 try:
     import anthropic
-    USE_SDK = True
+    HAS_ANTHROPIC = True
 except ImportError:
-    USE_SDK = False
+    HAS_ANTHROPIC = False
+    print("Warning: anthropic SDK not installed. Run: pip install anthropic")
 
 
+# Configuration
 FEATURES_PATH = Path("specs/features.json")
 CLAUDE_MD_PATH = Path(".claude/CLAUDE.md")
 MAX_RETRIES_PER_FEATURE = 5
+MAX_ITERATIONS_PER_FEATURE = 20
+
+# Model selection
+MODELS = {
+    "coding": "claude-sonnet-4-20250514",      # Sonnet for coding (sharper at syntax)
+    "specification": "claude-opus-4-5-20251101",  # Opus for high-level reasoning
+    "reflection": "claude-opus-4-5-20251101"     # Opus for lesson extraction
+}
 
 
-def load_features() -> list[dict]:
+@dataclass
+class IterationRecord:
+    """Record of a single iteration for history tracking."""
+    timestamp: str
+    iteration: int
+    response_summary: str = ""
+    error: str = ""
+    verification_result: str = ""
+    files_changed: list = field(default_factory=list)
+
+
+@dataclass
+class FeatureSession:
+    """Tracks state for a single feature's implementation session."""
+    feature: dict
+    messages: list = field(default_factory=list)
+    iterations: list = field(default_factory=list)
+    checkpoint: str = ""
+
+
+def load_features() -> dict:
     """Load the features backlog from specs/features.json."""
     if not FEATURES_PATH.exists():
-        print(f"ERROR: {FEATURES_PATH} not found. Run planning phase first.")
+        print(f"ERROR: {FEATURES_PATH} not found.")
+        print("Create specs/features.json with at least one feature.")
         sys.exit(1)
 
     with open(FEATURES_PATH) as f:
         data = json.load(f)
 
-    return data.get("features", [])
+    return data
 
 
-def save_features(features: list[dict]) -> None:
+def save_features(data: dict) -> None:
     """Save the features backlog back to specs/features.json."""
     with open(FEATURES_PATH, "w") as f:
-        json.dump({"features": features}, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 def find_next_feature(features: list[dict]) -> Optional[dict]:
@@ -59,205 +113,307 @@ def find_next_feature(features: list[dict]) -> Optional[dict]:
     for feature in features:
         if feature.get("status") == "failing":
             if feature.get("retries", 0) < MAX_RETRIES_PER_FEATURE:
-                return feature
+                if not feature.get("blocked"):
+                    return feature
 
     # Finally, look for todo
     for feature in features:
         if feature.get("status") == "todo":
-            return feature
+            if not feature.get("blocked"):
+                return feature
 
     return None
 
 
-def update_feature_status(features: list[dict], feature_id: str, status: str) -> None:
-    """Update a feature's status and timestamp."""
-    for feature in features:
+def update_feature_status(feature_id: str, status: str, increment_retries: bool = False) -> None:
+    """Update a feature's status in the JSON file."""
+    data = load_features()
+
+    for feature in data.get("features", []):
         if feature.get("id") == feature_id:
             feature["status"] = status
             feature["last_updated"] = datetime.now(timezone.utc).isoformat()
-            if status == "failing":
+            if increment_retries:
                 feature["retries"] = feature.get("retries", 0) + 1
             break
-    save_features(features)
+
+    save_features(data)
 
 
-def build_prompt(feature: dict) -> str:
-    """Build the prompt for Claude to implement a feature."""
-    constitution = ""
-    if CLAUDE_MD_PATH.exists():
-        constitution = CLAUDE_MD_PATH.read_text()
-
-    test_file = feature.get("test_file", f"tests/e2e/test_{feature['id']}.spec.ts")
-
-    return f"""
-# CONSTITUTION
-{constitution}
-
-# CURRENT TASK
-You are working on feature: {feature['id']}
-Description: {feature['description']}
-Status: {feature['status']}
-Test file: {test_file}
-
-# INSTRUCTIONS
-Follow the Test-First methodology strictly:
-
-1. WRITE TEST: Create a failing Playwright test in `{test_file}` that verifies the feature works.
-
-2. RUN TEST: Execute `npx playwright test {test_file}` to confirm it fails.
-   - If it passes immediately, your test is not testing the right thing. Rewrite it.
-
-3. IMPLEMENT: Write the minimum code to make the test pass.
-   - Only modify files necessary for this specific feature.
-   - Do not refactor unrelated code.
-
-4. RUN TEST AGAIN: Execute `npx playwright test {test_file}` to confirm it passes.
-
-5. UPDATE STATUS: Modify `specs/features.json`:
-   - Set status to "passing" if test passes
-   - Set status to "failing" if test still fails
-
-6. COMMIT: If passing, run:
-   ```bash
-   git add -A
-   git commit -m "PASSING: {feature['description']}"
-   ```
-
-7. EXIT: Once the feature is passing, stop and report success.
-
-# OUTPUT
-Report your actions step by step. End with either:
-- "FEATURE PASSING: {feature['id']}" if successful
-- "FEATURE FAILING: {feature['id']} - <reason>" if blocked
-"""
+def extract_text_from_response(response) -> str:
+    """Extract text content from Claude API response."""
+    text_parts = []
+    for block in response.content:
+        if hasattr(block, "text"):
+            text_parts.append(block.text)
+    return "\n".join(text_parts)
 
 
-def run_with_sdk(prompt: str) -> str:
-    """Run Claude using the Anthropic SDK."""
-    client = anthropic.Anthropic()
+def run_feature_loop(
+    session: FeatureSession,
+    client: "anthropic.Anthropic",
+    mcp: Optional[MCPManager] = None
+) -> bool:
+    """
+    Run the implementation loop for a single feature.
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=8192,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
+    Returns True if feature passes, False otherwise.
+    """
+    feature = session.feature
+    feature_id = feature.get("id", "unknown")
 
-    return message.content[0].text
+    print(f"\n{'='*60}")
+    print(f"Working on: {feature_id}")
+    print(f"Description: {feature.get('description', '')}")
+    print(f"{'='*60}")
+
+    # Build initial context with repo map
+    initial_context = build_feature_context(feature)
+
+    session.messages = [{
+        "role": "user",
+        "content": initial_context
+    }]
+
+    # Get tools from MCP if available
+    tools = mcp.get_all_tools() if mcp else []
+
+    iteration = 0
+    while iteration < MAX_ITERATIONS_PER_FEATURE:
+        iteration += 1
+        print(f"\n--- Iteration {iteration}/{MAX_ITERATIONS_PER_FEATURE} ---")
+
+        try:
+            # Call Claude
+            response = client.messages.create(
+                model=MODELS["coding"],
+                max_tokens=8192,
+                tools=tools if tools else None,
+                messages=session.messages
+            )
+
+            # Handle tool use
+            while response.stop_reason == "tool_use":
+                tool_results = []
+
+                for block in response.content:
+                    if block.type == "tool_use":
+                        print(f"  Tool: {block.name}")
+                        if mcp:
+                            result = mcp.execute_tool(block.name, block.input)
+                        else:
+                            result = json.dumps({"error": "MCP not available"})
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result
+                        })
+
+                # Continue conversation with tool results
+                session.messages.append({"role": "assistant", "content": response.content})
+                session.messages.append({"role": "user", "content": tool_results})
+
+                response = client.messages.create(
+                    model=MODELS["coding"],
+                    max_tokens=8192,
+                    tools=tools if tools else None,
+                    messages=session.messages
+                )
+
+            # Extract response text
+            response_text = extract_text_from_response(response)
+            print(f"\nResponse preview: {response_text[:500]}...")
+
+            # Record iteration
+            record = IterationRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                iteration=iteration,
+                response_summary=response_text[:1000]
+            )
+
+            # Check if agent claims completion
+            if claims_completion(response_text):
+                print("\nAgent claims completion. Running verification...")
+
+                # EXTERNAL VERIFICATION - harness runs the test
+                verification = verify_feature(feature, response_text)
+                record.verification_result = verification.reason
+
+                if verification.passed:
+                    print(f"✓ Feature test passes!")
+
+                    # Run regression check before final commit
+                    print("Running regression check...")
+                    regression = regression_check()
+
+                    if regression.passed:
+                        print("✓ All tests pass! Committing...")
+                        commit_feature(feature_id, feature.get("description", ""))
+                        session.iterations.append(record)
+                        return True
+                    else:
+                        # Regression detected - feed back to agent
+                        print(f"✗ Regression detected: {regression.failed_tests}")
+                        feedback = format_regression_feedback(regression, feature_id)
+                        session.messages.append({"role": "assistant", "content": response.content})
+                        session.messages.append({"role": "user", "content": feedback})
+                        record.error = f"Regression: {regression.failed_tests}"
+                else:
+                    # Verification failed - feed error back to agent
+                    print(f"✗ Verification failed: {verification.reason}")
+                    feedback = format_verification_feedback(verification)
+                    session.messages.append({"role": "assistant", "content": response.content})
+                    session.messages.append({"role": "user", "content": feedback})
+                    record.error = verification.stderr[:500]
+            else:
+                # Agent still working - continue conversation
+                session.messages.append({"role": "assistant", "content": response.content})
+
+            session.iterations.append(record)
+
+        except Exception as e:
+            print(f"Error in iteration: {e}")
+            session.iterations.append(IterationRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                iteration=iteration,
+                error=str(e)
+            ))
+
+    print(f"\nMax iterations ({MAX_ITERATIONS_PER_FEATURE}) reached for {feature_id}")
+    return False
 
 
-def run_with_cli(prompt: str) -> str:
-    """Run Claude using the CLI (claude-code or similar)."""
-    # Write prompt to temp file to avoid shell escaping issues
-    prompt_file = Path("/tmp/agent_prompt.txt")
-    prompt_file.write_text(prompt)
+def run_feature_with_checkpoints(
+    feature: dict,
+    client: "anthropic.Anthropic",
+    mcp: Optional[MCPManager] = None
+) -> bool:
+    """
+    Run a feature with git checkpoint/rollback support.
+    """
+    feature_id = feature.get("id", "unknown")
 
-    result = subprocess.run(
-        ["claude", "--print", "-f", str(prompt_file)],
-        capture_output=True,
-        text=True,
-        timeout=300
-    )
+    # Create checkpoint before starting
+    checkpoint = create_checkpoint(feature_id)
 
-    return result.stdout
+    session = FeatureSession(feature=feature, checkpoint=checkpoint)
 
+    try:
+        success = run_feature_loop(session, client, mcp)
 
-def run_claude(prompt: str) -> str:
-    """Run Claude using available method (SDK or CLI)."""
-    if USE_SDK:
-        return run_with_sdk(prompt)
-    else:
-        return run_with_cli(prompt)
+        if success:
+            # Run reflection to extract lessons
+            print("\nRunning reflection...")
+            iteration_history = [
+                {
+                    "error": r.error,
+                    "response_summary": r.response_summary,
+                    "verification_result": r.verification_result
+                }
+                for r in session.iterations
+            ]
+            learnings = run_reflection(feature, iteration_history, client)
+            if learnings:
+                save_learnings(learnings)
+                print(f"Extracted {len(learnings)} lessons for future agents")
 
+            return True
+        else:
+            # Rollback on failure
+            print("\nRolling back changes...")
+            rollback()
+            return False
 
-def check_all_passing(features: list[dict]) -> bool:
-    """Check if all features are passing."""
-    return all(f.get("status") == "passing" for f in features)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted. Rolling back...")
+        rollback()
+        raise
 
 
 def main():
-    """Main loop: find feature, prompt Claude, repeat until done."""
+    """Main entry point."""
     print("=" * 60)
-    print("AUTONOMOUS AGENT LOOP - Starting")
+    print("AUTONOMOUS AGENT HARNESS - MCP-Native Loop")
     print("=" * 60)
 
-    iteration = 0
-    max_iterations = 100  # Safety limit
+    # Verify prerequisites
+    if not HAS_ANTHROPIC:
+        print("ERROR: anthropic SDK required. Run: pip install anthropic")
+        return 1
 
-    while iteration < max_iterations:
-        iteration += 1
-        print(f"\n--- Iteration {iteration} ---")
+    # Ensure git repo exists
+    if not ensure_repo():
+        print("ERROR: Could not initialize git repository")
+        return 1
 
-        # Reload features each iteration (Claude may have modified them)
-        features = load_features()
+    # Initialize Anthropic client
+    client = anthropic.Anthropic()
 
-        # Check if we're done
-        if check_all_passing(features):
-            print("\n" + "=" * 60)
-            print("SUCCESS: All features are passing!")
-            print("=" * 60)
-            return 0
+    # Initialize MCP servers
+    mcp = None
+    try:
+        mcp = MCPManager.from_config()
+        tools = mcp.get_all_tools()
+        print(f"MCP servers loaded: {len(tools)} tools available")
+    except FileNotFoundError:
+        print("Warning: No MCP config found. Running without tool execution.")
+    except Exception as e:
+        print(f"Warning: MCP initialization failed: {e}")
+        print("Running without tool execution.")
 
-        # Find next feature
-        feature = find_next_feature(features)
+    try:
+        # Main loop
+        while True:
+            # Reload features each iteration
+            data = load_features()
+            features = data.get("features", [])
 
-        if not feature:
-            # Check for blocked features
-            blocked = [f for f in features if f.get("blocked")]
-            if blocked:
-                print(f"\nBLOCKED: {len(blocked)} features are blocked")
-                for f in blocked:
-                    print(f"  - {f['id']}: {f.get('block_reason', 'unknown')}")
-                return 1
+            # Check if all done
+            all_passing = all(f.get("status") == "passing" for f in features)
+            if all_passing:
+                print("\n" + "=" * 60)
+                print("SUCCESS: All features are passing!")
+                print("=" * 60)
+                return 0
 
-            # Check for max retries exceeded
-            exhausted = [f for f in features if f.get("retries", 0) >= MAX_RETRIES_PER_FEATURE]
-            if exhausted:
-                print(f"\nEXHAUSTED: {len(exhausted)} features exceeded max retries")
-                for f in exhausted:
-                    print(f"  - {f['id']}")
-                return 1
+            # Find next feature
+            feature = find_next_feature(features)
 
-            print("\nNo actionable features found. Exiting.")
-            return 0
+            if not feature:
+                # Check for blocked or exhausted features
+                blocked = [f for f in features if f.get("blocked")]
+                exhausted = [f for f in features if f.get("retries", 0) >= MAX_RETRIES_PER_FEATURE]
 
-        print(f"Working on: {feature['id']} ({feature['status']})")
-        print(f"Description: {feature['description']}")
+                if blocked:
+                    print(f"\n{len(blocked)} features are blocked:")
+                    for f in blocked:
+                        print(f"  - {f['id']}: {f.get('block_reason', 'unknown')}")
 
-        # Update status to in_progress if it was todo
-        if feature["status"] == "todo":
-            update_feature_status(features, feature["id"], "in_progress")
+                if exhausted:
+                    print(f"\n{len(exhausted)} features exhausted retries:")
+                    for f in exhausted:
+                        print(f"  - {f['id']}")
 
-        # Build and run prompt
-        prompt = build_prompt(feature)
+                return 1 if (blocked or exhausted) else 0
 
-        try:
-            response = run_claude(prompt)
-            print("\n--- Claude Response ---")
-            print(response[:2000] + "..." if len(response) > 2000 else response)
+            # Update status to in_progress
+            if feature.get("status") == "todo":
+                update_feature_status(feature["id"], "in_progress")
 
-            # Check response for success/failure indicators
-            if "FEATURE PASSING" in response:
-                print(f"\nFeature {feature['id']} marked as passing by Claude")
-            elif "FEATURE FAILING" in response:
-                print(f"\nFeature {feature['id']} still failing")
-                # Reload and update retry count
-                features = load_features()
-                update_feature_status(features, feature["id"], "failing")
+            # Run the feature
+            success = run_feature_with_checkpoints(feature, client, mcp)
 
-        except subprocess.TimeoutExpired:
-            print(f"\nTimeout while working on {feature['id']}")
-            features = load_features()
-            update_feature_status(features, feature["id"], "failing")
+            if success:
+                update_feature_status(feature["id"], "passing")
+            else:
+                update_feature_status(feature["id"], "failing", increment_retries=True)
 
-        except Exception as e:
-            print(f"\nError while working on {feature['id']}: {e}")
-            features = load_features()
-            update_feature_status(features, feature["id"], "failing")
-
-    print(f"\nMax iterations ({max_iterations}) reached. Exiting.")
-    return 1
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user.")
+        return 130
+    finally:
+        if mcp:
+            mcp.shutdown()
 
 
 if __name__ == "__main__":

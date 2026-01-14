@@ -119,6 +119,74 @@ Always read these files at the start of each session:
 - `specs/product_spec.md` — High-level product requirements (if exists)
 - `specs/tech_plan.md` — Technical architecture decisions (if exists)
 
+## Harness Enforcement
+
+The harness (`harness/loop.py`) enforces these rules automatically:
+
+### External Verification
+
+**Your claims of completion are verified independently.**
+
+When you say "FEATURE PASSING" or indicate a test passes, the harness will:
+1. Run `npx playwright test <test_file>` independently
+2. Compare your claim against actual test results
+3. Reject false claims and feed the actual error back to you
+
+**Do not claim success unless you are certain.** The harness catches hallucinations.
+
+### Regression Fence
+
+Before any feature is marked as `passing`:
+1. The harness runs the **entire test suite**
+2. If ANY test fails (not just your feature's test), the feature is rejected
+3. You must fix regressions before proceeding
+
+**Your changes must not break existing features.**
+
+### Git Checkpoints
+
+The harness manages git automatically:
+- **Checkpoint** created before each feature starts
+- **Commit** only happens after harness verification passes
+- **Rollback** happens automatically if you fail after max iterations
+
+You do not need to run git commands manually.
+
+### File Scope (Optional)
+
+Features may define a `file_scope` that restricts which files you can modify:
+```json
+{
+  "file_scope": {
+    "create": ["src/components/LoginForm.tsx"],
+    "modify": ["src/app/login/page.tsx"],
+    "forbidden": [".env*", "package.json"]
+  }
+}
+```
+
+If defined, changes outside this scope will be rejected.
+
+## Knowledge Transfer
+
+### Reading Lessons
+
+Check `specs/learnings.json` for lessons from previous features:
+- API gotchas that previous agents discovered
+- Package issues and workarounds
+- Patterns that work well in this codebase
+
+This knowledge prevents you from repeating past mistakes.
+
+### Contributing Lessons
+
+After your feature passes, the harness will ask you to reflect on:
+- APIs that behaved unexpectedly
+- Packages that had issues
+- Patterns you discovered
+
+Your lessons help future agents work more efficiently.
+
 ## Exit Conditions
 
 Stop execution and report when:
