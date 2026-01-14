@@ -1636,8 +1636,12 @@ def generate_manual_qa_plan(report: HealthReport, user_routes: list[dict]) -> No
     print(f"\nGenerated Manual QA Plan: {MANUAL_QA_PATH}")
 
 
-def cmd_qa() -> int:
-    """Generate manual QA verification checklist (interactive)."""
+def cmd_qa(interactive: bool = True) -> int:
+    """Generate manual QA verification checklist.
+
+    Args:
+        interactive: If True, prompt for additional routes. If False, auto-detect only.
+    """
     if not HEALTH_REPORT_PATH.exists():
         print("No health report found. Running diagnosis first...")
         cmd_diagnose()
@@ -1666,8 +1670,13 @@ def cmd_qa() -> int:
         for svc in services:
             print(f"  - {svc.name}")
 
-    # Prompt for additional routes
-    user_routes = prompt_for_additional_routes()
+    # Prompt for additional routes only if interactive and TTY available
+    if interactive and sys.stdin.isatty():
+        user_routes = prompt_for_additional_routes()
+    else:
+        user_routes = []
+        if not interactive:
+            print("(Non-interactive mode: skipping route prompts)")
 
     # Generate the plan
     generate_manual_qa_plan(report, user_routes)
@@ -1801,7 +1810,14 @@ Examples:
     subparsers.add_parser("stabilize", help="Generate stabilization tasks")
     subparsers.add_parser("baseline", help="Generate test strategy recommendations")
     subparsers.add_parser("fixtures", help="Scaffold webhook fixture structure")
-    subparsers.add_parser("qa", help="Generate manual QA verification checklist (interactive)")
+
+    qa_parser = subparsers.add_parser("qa", help="Generate manual QA verification checklist")
+    qa_parser.add_argument(
+        "-y", "--no-interactive",
+        action="store_true",
+        help="Skip interactive prompts, use auto-detection only"
+    )
+
     subparsers.add_parser("solidify", help="Generate baseline tests from verified QA results")
 
     args = parser.parse_args()
@@ -1815,7 +1831,8 @@ Examples:
     elif args.command == "fixtures":
         return cmd_fixtures()
     elif args.command == "qa":
-        return cmd_qa()
+        interactive = not getattr(args, "no_interactive", False)
+        return cmd_qa(interactive=interactive)
     elif args.command == "solidify":
         return cmd_solidify()
     else:

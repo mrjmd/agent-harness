@@ -1,10 +1,12 @@
 """
 Reviewers module - Pluggable review provider implementations.
 
-This module provides the abstraction layer for different review providers:
-- ManualReviewer: Clipboard-based manual review (Phase 1)
-- GeminiReviewer: Gemini API integration (Phase 3)
-- ClaudeReviewer: Claude API for reverse review (Phase 3)
+Currently implemented:
+- ManualReviewer: Clipboard-based manual review
+
+Future providers (not yet implemented):
+- GeminiReviewer: Gemini API integration
+- ClaudeReviewer: Claude API for reverse review
 """
 
 from .base import ReviewProvider, ReviewResult

@@ -21,8 +21,37 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Configuration path
-CONFIG_PATH = Path(".claude/config.json")
+def find_project_root() -> Path:
+    """
+    Find the project root by walking up from cwd looking for markers.
+
+    Markers checked (in order):
+    1. .claude/ directory
+    2. .git directory
+    3. package.json file
+
+    Returns cwd if no markers found.
+    """
+    current = Path.cwd().resolve()
+
+    for directory in [current] + list(current.parents):
+        # Check for .claude directory (our marker)
+        if (directory / ".claude").is_dir():
+            return directory
+        # Check for .git (common root marker)
+        if (directory / ".git").exists():
+            return directory
+        # Check for package.json
+        if (directory / "package.json").is_file():
+            return directory
+
+    # Fallback to cwd
+    return Path.cwd()
+
+
+def get_config_path() -> Path:
+    """Get the config path relative to project root."""
+    return find_project_root() / ".claude" / "config.json"
 
 
 def load_test_config() -> tuple[list[str], int]:
@@ -37,11 +66,12 @@ def load_test_config() -> tuple[list[str], int]:
     default_cmd = ["npx", "playwright", "test"]
     default_timeout = 120
 
-    if not CONFIG_PATH.exists():
+    config_path = get_config_path()
+    if not config_path.exists():
         return default_cmd, default_timeout
 
     try:
-        config = json.loads(CONFIG_PATH.read_text())
+        config = json.loads(config_path.read_text())
         settings = config.get("settings", {})
 
         # Parse test command - handles quoted strings properly

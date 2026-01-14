@@ -40,8 +40,10 @@ class ReviewProvider(Protocol):
     Implementations must provide a `review` method that takes stage information,
     context, and output, and returns a ReviewResult.
 
-    Example implementations:
+    Current implementations:
         - ManualReviewer: Clipboard-based manual review
+
+    Future implementations (planned):
         - GeminiReviewer: Gemini API integration
         - ClaudeReviewer: Claude API integration
         - MockReviewer: For testing
