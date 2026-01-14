@@ -373,22 +373,61 @@ def detect_project_type() -> ProjectType:
 # Static Analysis
 # =============================================================================
 
+def discover_lint_command() -> Optional[list[str]]:
+    """
+    Discover the lint command from package.json scripts.
+
+    Looks for common lint script names and returns the npm command to run it.
+    Returns None if no lint script is found.
+    """
+    package_json = Path("package.json")
+    if not package_json.exists():
+        return None
+
+    try:
+        pkg = json.loads(package_json.read_text())
+        scripts = pkg.get("scripts", {})
+
+        # Priority order for lint script names
+        lint_names = ["lint", "eslint", "lint:check", "lint:all", "check:lint"]
+
+        for name in lint_names:
+            if name in scripts:
+                # Check if the script already outputs JSON
+                script_cmd = scripts[name]
+                if "--format=json" in script_cmd or "-f json" in script_cmd:
+                    return ["npm", "run", name]
+                else:
+                    return ["npm", "run", name, "--", "--format=json"]
+
+        # Fallback: check if any script contains "eslint" in the command
+        for name, cmd in scripts.items():
+            if "eslint" in cmd.lower() and "lint" in name.lower():
+                return ["npm", "run", name, "--", "--format=json"]
+
+        return None
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
 def audit_lint_health() -> list[LintResult]:
     """Run available linters and collect results."""
     results = []
 
-    # Try ESLint
+    # Try ESLint - discover command dynamically
     if Path("package.json").exists():
-        code, stdout, stderr = run_shell(["npm", "run", "lint", "--", "--format=json"], timeout=120)
-        if code != -1:  # Command exists
-            error_count = stdout.count('"severity":2') + stderr.count('"severity":2')
-            warning_count = stdout.count('"severity":1') + stderr.count('"severity":1')
-            results.append(LintResult(
-                tool="eslint",
-                error_count=error_count,
-                warning_count=warning_count,
-                output=(stdout + stderr)[:2000]
-            ))
+        lint_cmd = discover_lint_command()
+        if lint_cmd:
+            code, stdout, stderr = run_shell(lint_cmd, timeout=120)
+            if code != -1:  # Command exists
+                error_count = stdout.count('"severity":2') + stderr.count('"severity":2')
+                warning_count = stdout.count('"severity":1') + stderr.count('"severity":1')
+                results.append(LintResult(
+                    tool="eslint",
+                    error_count=error_count,
+                    warning_count=warning_count,
+                    output=(stdout + stderr)[:2000]
+                ))
 
     # Try TypeScript
     if Path("tsconfig.json").exists():
@@ -1493,6 +1532,253 @@ def cmd_fixtures() -> int:
     return 0
 
 
+# =============================================================================
+# Manual QA Commands
+# =============================================================================
+
+def prompt_for_additional_routes() -> list[dict]:
+    """Interactively prompt user for additional business-critical routes."""
+    print("\n" + "=" * 50)
+    print("ADD BUSINESS-CRITICAL ROUTES")
+    print("=" * 50)
+    print("Enter routes that are critical but weren't auto-detected.")
+    print("Format: /path [api|page]")
+    print("Examples:")
+    print("  /api/checkout")
+    print("  /dashboard/settings page")
+    print("Enter empty line when done.\n")
+
+    additional = []
+    while True:
+        try:
+            line = input("Route: ").strip()
+            if not line:
+                break
+
+            # Parse input
+            parts = line.split()
+            path = parts[0] if parts else ""
+            route_type = "page"  # default
+
+            # Determine type
+            if len(parts) > 1 and parts[1].lower() in ("api", "page"):
+                route_type = parts[1].lower()
+            elif "/api" in path.lower():
+                route_type = "api"
+
+            if path.startswith("/"):
+                additional.append({
+                    "path": path,
+                    "type": route_type,
+                    "source": "user"
+                })
+                print(f"  Added: {path} ({route_type})")
+            else:
+                print("  Skipped: Route must start with /")
+
+        except (EOFError, KeyboardInterrupt):
+            print("\nDone adding routes.")
+            break
+
+    return additional
+
+
+def generate_manual_qa_plan(report: HealthReport, user_routes: list[dict]) -> None:
+    """Generate a checklist combining auto-detected and user-specified routes."""
+    lines = [
+        "# Manual QA Plan",
+        "",
+        "Verify the following routes work manually.",
+        "Check the box `[x]` if it works. Leave `[ ]` if broken or untested.",
+        "",
+    ]
+
+    # Auto-detected routes
+    auto_routes = report.routes or []
+    if auto_routes:
+        lines.append("## Auto-Detected Routes")
+        lines.append("")
+        api_routes = [r for r in auto_routes if r.get("type") == "api"]
+        page_routes = [r for r in auto_routes if r.get("type") == "page"]
+
+        if api_routes:
+            lines.append("### API Endpoints")
+            for route in api_routes:
+                lines.append(f"- [ ] `{route['path']}` (Source: `{route.get('file', 'unknown')}`)")
+            lines.append("")
+
+        if page_routes:
+            lines.append("### Pages")
+            for route in page_routes:
+                lines.append(f"- [ ] `{route['path']}` (Source: `{route.get('file', 'unknown')}`)")
+            lines.append("")
+
+    # User-specified critical routes
+    if user_routes:
+        lines.append("## Business-Critical Routes (User-Specified)")
+        lines.append("")
+        for route in user_routes:
+            lines.append(f"- [ ] `{route['path']}` ({route['type']}) - **CRITICAL**")
+        lines.append("")
+
+    # External services
+    if report.external_services:
+        lines.append("## External Service Integration")
+        lines.append("")
+        for svc in report.external_services:
+            lines.append(f"- [ ] **{svc.name}**: Verify webhook/API connection works")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("After verification, run `python harness/doctor.py solidify` to generate baseline tests.")
+
+    MANUAL_QA_PATH.write_text("\n".join(lines))
+    print(f"\nGenerated Manual QA Plan: {MANUAL_QA_PATH}")
+
+
+def cmd_qa() -> int:
+    """Generate manual QA verification checklist (interactive)."""
+    if not HEALTH_REPORT_PATH.exists():
+        print("No health report found. Running diagnosis first...")
+        cmd_diagnose()
+
+    print("\nDiscovering routes...")
+    routes = discover_routes()
+    services = detect_external_services()
+
+    report = HealthReport(
+        status=HealthStatus.HEALTHY,
+        project_type=detect_project_type(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        routes=routes,
+        external_services=services,
+    )
+
+    # Show what was auto-detected
+    print(f"\nAuto-detected {len(routes)} routes:")
+    for route in routes[:10]:  # Show first 10
+        print(f"  {route.get('type', '?'):5} {route['path']}")
+    if len(routes) > 10:
+        print(f"  ... and {len(routes) - 10} more")
+
+    if services:
+        print(f"\nDetected {len(services)} external services:")
+        for svc in services:
+            print(f"  - {svc.name}")
+
+    # Prompt for additional routes
+    user_routes = prompt_for_additional_routes()
+
+    # Generate the plan
+    generate_manual_qa_plan(report, user_routes)
+
+    print("\nNext steps:")
+    print("  1. Open specs/manual_qa_plan.md")
+    print("  2. Manually test each route")
+    print("  3. Check [x] the boxes that work")
+    print("  4. Run: python harness/doctor.py solidify")
+
+    return 0
+
+
+def parse_verified_routes() -> tuple[list[dict], list[dict]]:
+    """
+    Parse manual_qa_plan.md for verified (checked) routes.
+
+    Returns:
+        Tuple of (verified_routes, verified_services)
+    """
+    if not MANUAL_QA_PATH.exists():
+        return [], []
+
+    content = MANUAL_QA_PATH.read_text()
+    verified_routes = []
+    verified_services = []
+
+    for line in content.split("\n"):
+        # Match checked boxes: - [x] or - [X]
+        if re.match(r"^-\s*\[x\]", line, re.IGNORECASE):
+            # Extract route path (in backticks)
+            path_match = re.search(r"`([^`]+)`", line)
+            if path_match:
+                path = path_match.group(1)
+                if path.startswith("/"):
+                    # Determine type from context
+                    route_type = "api" if "/api" in path.lower() else "page"
+                    # Check if explicitly marked
+                    if "(api)" in line.lower():
+                        route_type = "api"
+                    elif "(page)" in line.lower():
+                        route_type = "page"
+
+                    verified_routes.append({"path": path, "type": route_type})
+
+            # Check for service name (bold text)
+            svc_match = re.search(r"\*\*([^*:]+)\*\*:", line)
+            if svc_match:
+                verified_services.append({"name": svc_match.group(1).strip()})
+
+    return verified_routes, verified_services
+
+
+def cmd_solidify() -> int:
+    """Generate baseline tests from verified manual QA results."""
+    verified_routes, verified_services = parse_verified_routes()
+
+    if not verified_routes and not verified_services:
+        print("No verified routes found in specs/manual_qa_plan.md")
+        print("\nTo use this command:")
+        print("  1. Run: python harness/doctor.py qa")
+        print("  2. Manually test each route")
+        print("  3. Check [x] the boxes that work")
+        print("  4. Run this command again")
+        return 1
+
+    print(f"Found {len(verified_routes)} verified routes, {len(verified_services)} verified services")
+
+    # Generate baseline test via Claude
+    routes_json = json.dumps(verified_routes, indent=2)
+
+    prompt = f"""Generate a Playwright test file for these verified working routes.
+
+VERIFIED ROUTES:
+{routes_json}
+
+Requirements:
+- File will be: tests/e2e/baseline_verified.spec.ts
+- For each route, write a simple smoke test
+- API routes: use request.get() and check for status < 400
+- Page routes: use page.goto() and check for no crash (check title or body exists)
+- DO NOT test authentication flows or fill forms
+- Just verify the route is reachable and doesn't error
+- Group tests logically (API vs Pages)
+
+Output ONLY the TypeScript code, no markdown code blocks or explanations."""
+
+    try:
+        print("\nGenerating baseline tests via Claude...")
+        test_code = call_claude_cli(prompt, timeout=120)
+
+        # Clean up code block markers if present
+        test_code = re.sub(r"^```\w*\n?", "", test_code)
+        test_code = re.sub(r"\n?```$", "", test_code)
+
+        output_path = Path("tests/e2e/baseline_verified.spec.ts")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(test_code)
+
+        print(f"\nGenerated baseline tests: {output_path}")
+        print("\nNext steps:")
+        print("  1. Review the generated tests")
+        print("  2. Run: npx playwright test tests/e2e/baseline_verified.spec.ts")
+        print("  3. Fix any failures, then commit as your 'Golden Spike'")
+
+        return 0
+    except Exception as e:
+        print(f"Error generating tests: {e}")
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Brownfield Doctor - Phase 0 Health Audit System",
@@ -1504,6 +1790,8 @@ Examples:
   python harness/doctor.py stabilize    # Generate fix tasks
   python harness/doctor.py baseline     # Generate test strategy
   python harness/doctor.py fixtures     # Scaffold webhook fixtures
+  python harness/doctor.py qa           # Generate manual QA checklist (interactive)
+  python harness/doctor.py solidify     # Generate baseline tests from verified QA
         """
     )
 
@@ -1513,6 +1801,8 @@ Examples:
     subparsers.add_parser("stabilize", help="Generate stabilization tasks")
     subparsers.add_parser("baseline", help="Generate test strategy recommendations")
     subparsers.add_parser("fixtures", help="Scaffold webhook fixture structure")
+    subparsers.add_parser("qa", help="Generate manual QA verification checklist (interactive)")
+    subparsers.add_parser("solidify", help="Generate baseline tests from verified QA results")
 
     args = parser.parse_args()
 
@@ -1524,6 +1814,10 @@ Examples:
         return cmd_baseline()
     elif args.command == "fixtures":
         return cmd_fixtures()
+    elif args.command == "qa":
+        return cmd_qa()
+    elif args.command == "solidify":
+        return cmd_solidify()
     else:
         # Default: run diagnose and recommend action
         result = cmd_diagnose()

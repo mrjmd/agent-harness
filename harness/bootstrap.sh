@@ -151,6 +151,8 @@ if [[ ! -f "package.json" ]]; then
     "doctor:stabilize": "python3 harness/doctor.py stabilize",
     "doctor:baseline": "python3 harness/doctor.py baseline",
     "doctor:fixtures": "python3 harness/doctor.py fixtures",
+    "doctor:qa": "python3 harness/doctor.py qa",
+    "doctor:solidify": "python3 harness/doctor.py solidify",
     "spec": "python3 harness/architect.py",
     "spec:new": "python3 harness/architect.py new",
     "spec:resume": "python3 harness/architect.py resume",

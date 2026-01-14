@@ -719,13 +719,13 @@ def build_context(state: SpecificationState) -> str:
 
     # Include health report context if available (brownfield projects)
     if HEALTH_REPORT_PATH.exists():
-        context_parts.append(_extract_health_context())
+        context_parts.append(_summarize_health_for_architect())
 
     return "\n".join(context_parts)
 
 
 def _extract_health_context() -> str:
-    """Extract relevant context from health report for the Architect."""
+    """Extract relevant context from health report for the Architect (truncation fallback)."""
     try:
         content = HEALTH_REPORT_PATH.read_text()
         context_parts = ["\n## Known Issues from Health Report"]
@@ -768,6 +768,50 @@ def _extract_health_context() -> str:
         pass
 
     return ""
+
+
+def _summarize_health_for_architect() -> str:
+    """
+    Generate executive summary of health report for Architect context.
+
+    Uses Claude to intelligently summarize the health report, focusing on
+    critical issues that affect architecture decisions. Falls back to
+    truncation if summarization fails.
+    """
+    if not HEALTH_REPORT_PATH.exists():
+        return ""
+
+    try:
+        content = HEALTH_REPORT_PATH.read_text()
+
+        # If report is small, just return it (no need to summarize)
+        if len(content) < 2000:
+            return f"\n## Health Report (Brownfield)\n{content}"
+
+        # Use Claude to summarize
+        summary_prompt = f"""Summarize this health report for an AI Architect planning a new feature.
+
+Focus on:
+- Critical blockers that affect architecture decisions
+- Security concerns (SECURITY, HACK annotations)
+- External service dependencies that need consideration
+- Test coverage gaps
+- Any patterns marked as LEGACY or ANTIPATTERN
+
+Be concise (10 bullet points max). Highlight what the Architect MUST know before designing.
+
+HEALTH REPORT:
+{content[:8000]}
+
+EXECUTIVE SUMMARY (bullet points):"""
+
+        summary = call_claude_cli(summary_prompt)
+        return f"\n## Health Report Summary (Brownfield)\n{summary}"
+
+    except Exception as e:
+        # Fallback to truncation if CLI fails
+        print(f"(Health summary failed: {e}, using truncation)")
+        return _extract_health_context()
 
 
 def run_repl(state: SpecificationState) -> None:
