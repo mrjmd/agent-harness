@@ -16,17 +16,17 @@ This harness provides a template for autonomous coding agents that:
 ## Quick Start
 
 ```bash
-# 1. Specify your product (required first)
-python harness/architect.py new "Your product idea"
+# 1. Install Claude CLI
+npm install -g @anthropic-ai/claude-code
 
-# 2. Set API key for coding loop (uses Anthropic SDK)
-export ANTHROPIC_API_KEY=your-key
+# 2. Specify your product (required first)
+python harness/architect.py new "Your product idea"
 
 # 3. Execute the implementation
 python harness/coding/loop.py
 ```
 
-> **Note:** The specification phase uses the `claude` CLI (install via `npm install -g @anthropic-ai/claude-code`). The coding loop uses the Anthropic SDK directly.
+> **Note:** Both phases use the `claude` CLI for LLM calls. No API key needed - the CLI handles authentication.
 
 ## The Two Harnesses
 
@@ -144,11 +144,8 @@ The shared contract between Architect and Coding Loop:
 ### Manual setup
 
 ```bash
-# Install Claude CLI (for specification phase)
+# Install Claude CLI (handles all LLM calls)
 npm install -g @anthropic-ai/claude-code
-
-# Install Python dependencies (for coding loop)
-pip install anthropic
 
 # Install Playwright (for testing)
 npm install --save-dev @playwright/test

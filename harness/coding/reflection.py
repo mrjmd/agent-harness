@@ -10,23 +10,15 @@ during this feature gets persisted so future features don't make the same mistak
 
 import json
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-# Try to import anthropic for reflection calls
-try:
-    import anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-
 
 LEARNINGS_PATH = Path("specs/learnings.json")
-
-# Use Opus for reflection (high-level reasoning task)
-REFLECTION_MODEL = "claude-opus-4-5-20251101"
 
 
 REFLECTION_PROMPT = """
@@ -90,10 +82,32 @@ class Learning:
     context: str = ""
 
 
+def call_claude_cli(prompt_text: str) -> str:
+    """Call claude CLI with formatted prompt."""
+    try:
+        result = subprocess.run(
+            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=300  # 5 minute timeout
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Claude CLI error: {e.stderr}")
+        raise
+    except subprocess.TimeoutExpired:
+        print("Claude CLI timed out after 5 minutes")
+        raise
+    except FileNotFoundError:
+        print("ERROR: 'claude' CLI not found. Install it first.")
+        print("Run: npm install -g @anthropic-ai/claude-code")
+        raise
+
+
 def run_reflection(
     feature: dict,
-    iteration_history: list[dict],
-    client: Optional["anthropic.Anthropic"] = None
+    iteration_history: list[dict]
 ) -> list[Learning]:
     """
     Extract lessons learned after feature completion.
@@ -101,18 +115,10 @@ def run_reflection(
     Args:
         feature: The completed feature dict
         iteration_history: List of iteration records with prompts/responses/errors
-        client: Optional Anthropic client (creates one if not provided)
 
     Returns:
         List of Learning objects extracted from reflection
     """
-    if not HAS_ANTHROPIC:
-        print("Warning: anthropic SDK not available, skipping reflection")
-        return []
-
-    if client is None:
-        client = anthropic.Anthropic()
-
     # Format iteration history
     history_text = format_iteration_history(iteration_history)
 
@@ -124,13 +130,7 @@ def run_reflection(
     )
 
     try:
-        response = client.messages.create(
-            model=REFLECTION_MODEL,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        response_text = response.content[0].text
+        response_text = call_claude_cli(prompt)
         learnings = parse_learnings(response_text, feature)
         return learnings
 

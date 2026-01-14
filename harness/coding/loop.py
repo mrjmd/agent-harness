@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Autonomous Agent Loop - MCP-Native Implementation
+Autonomous Agent Loop - CLI-Native Implementation
 
 This script orchestrates the Plan -> Test -> Code cycle with:
-1. MCP server integration for real tool execution
+1. Claude CLI for code execution (uses built-in tools)
 2. External verification (harness runs tests, not agent)
 3. Git checkpoints (commit on green, reset on red)
 4. Regression fence (all tests must pass)
 5. Repository map for brownfield safety
 6. Reflection for knowledge transfer
+7. Pattern enforcement for brownfield projects
 
-The key insight: Claude actually executes tools through MCP servers,
-not just talking about what it would do.
+The key insight: Claude CLI executes tools internally, but verification
+is external - the harness runs tests to catch hallucinations.
 """
 
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +24,6 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 # Local modules
-from mcp_manager import MCPManager
 from verify import (
     verify_feature,
     regression_check,
@@ -31,7 +32,6 @@ from verify import (
     format_regression_feedback
 )
 from git_utils import (
-    get_status,
     create_checkpoint,
     commit_feature,
     rollback,
@@ -41,27 +41,12 @@ from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
 from review import enforce_patterns, PatternViolation, get_modified_files
 
-# Anthropic SDK
-try:
-    import anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-    print("Warning: anthropic SDK not installed. Run: pip install anthropic")
-
 
 # Configuration
 FEATURES_PATH = Path("specs/features.json")
 CLAUDE_MD_PATH = Path(".claude/CLAUDE.md")
 MAX_RETRIES_PER_FEATURE = 5
 MAX_ITERATIONS_PER_FEATURE = 20
-
-# Model selection
-MODELS = {
-    "coding": "claude-sonnet-4-20250514",      # Sonnet for coding (sharper at syntax)
-    "specification": "claude-opus-4-5-20251101",  # Opus for high-level reasoning
-    "reflection": "claude-opus-4-5-20251101"     # Opus for lesson extraction
-}
 
 
 @dataclass
@@ -79,9 +64,88 @@ class IterationRecord:
 class FeatureSession:
     """Tracks state for a single feature's implementation session."""
     feature: dict
-    messages: list = field(default_factory=list)
+    conversation_history: list = field(default_factory=list)
     iterations: list = field(default_factory=list)
     checkpoint: str = ""
+
+
+def call_claude_cli(prompt_text: str, timeout: int = 600) -> str:
+    """
+    Call claude CLI with formatted prompt.
+
+    The CLI will execute with its built-in tools (file editing, etc.)
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Claude CLI error: {e.stderr}")
+        raise
+    except subprocess.TimeoutExpired:
+        print(f"Claude CLI timed out after {timeout} seconds")
+        raise
+    except FileNotFoundError:
+        print("ERROR: 'claude' CLI not found.")
+        print("Install it: npm install -g @anthropic-ai/claude-code")
+        sys.exit(1)
+
+
+def format_conversation(context: str, history: list, current_feedback: str = "") -> str:
+    """
+    Format the full conversation for CLI input.
+
+    Since CLI takes a single string (not a messages array), we concatenate
+    the context, history, and any current feedback.
+    """
+    parts = []
+
+    # Initial context (includes constitution, repo map, feature spec)
+    parts.append("=" * 60)
+    parts.append("TASK CONTEXT")
+    parts.append("=" * 60)
+    parts.append(context)
+    parts.append("")
+
+    # Conversation history (previous iterations and feedback)
+    if history:
+        parts.append("=" * 60)
+        parts.append("PREVIOUS ITERATIONS")
+        parts.append("=" * 60)
+        for entry in history:
+            if entry.get("type") == "response":
+                parts.append(f"\n[YOUR PREVIOUS RESPONSE]\n{entry['content'][:2000]}")
+            elif entry.get("type") == "feedback":
+                parts.append(f"\n[HARNESS FEEDBACK]\n{entry['content']}")
+        parts.append("")
+
+    # Current feedback (if any)
+    if current_feedback:
+        parts.append("=" * 60)
+        parts.append("CURRENT FEEDBACK")
+        parts.append("=" * 60)
+        parts.append(current_feedback)
+        parts.append("")
+
+    # Instructions
+    parts.append("=" * 60)
+    parts.append("INSTRUCTIONS")
+    parts.append("=" * 60)
+    parts.append("""
+Work on the feature described above. Follow TDD:
+1. Write a failing test first (in tests/e2e/)
+2. Implement the minimum code to make it pass
+3. When complete, say "IMPLEMENTATION COMPLETE" clearly
+
+The harness will verify your work externally. If tests fail, you'll receive feedback.
+""")
+
+    return "\n".join(parts)
 
 
 def validate_feature(feature: dict) -> list[str]:
@@ -94,9 +158,9 @@ def validate_feature(feature: dict) -> list[str]:
 
     # Required fields
     required = ["id", "description", "acceptance_criteria", "edge_cases", "priority"]
-    for field in required:
-        if field not in feature:
-            warnings.append(f"[{feature_id}] Missing required field: {field}")
+    for field_name in required:
+        if field_name not in feature:
+            warnings.append(f"[{feature_id}] Missing required field: {field_name}")
 
     # Edge cases validation (Rule of 3)
     edge_cases = feature.get("edge_cases", [])
@@ -212,20 +276,7 @@ def update_feature_status(feature_id: str, status: str, increment_retries: bool 
     save_features(data)
 
 
-def extract_text_from_response(response) -> str:
-    """Extract text content from Claude API response."""
-    text_parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            text_parts.append(block.text)
-    return "\n".join(text_parts)
-
-
-def run_feature_loop(
-    session: FeatureSession,
-    client: "anthropic.Anthropic",
-    mcp: Optional[MCPManager] = None
-) -> bool:
+def run_feature_loop(session: FeatureSession) -> bool:
     """
     Run the implementation loop for a single feature.
 
@@ -242,58 +293,25 @@ def run_feature_loop(
     # Build initial context with repo map
     initial_context = build_feature_context(feature)
 
-    session.messages = [{
-        "role": "user",
-        "content": initial_context
-    }]
-
-    # Get tools from MCP if available
-    tools = mcp.get_all_tools() if mcp else []
-
     iteration = 0
+    current_feedback = ""
+
     while iteration < MAX_ITERATIONS_PER_FEATURE:
         iteration += 1
         print(f"\n--- Iteration {iteration}/{MAX_ITERATIONS_PER_FEATURE} ---")
 
         try:
-            # Call Claude
-            response = client.messages.create(
-                model=MODELS["coding"],
-                max_tokens=8192,
-                tools=tools if tools else None,
-                messages=session.messages
+            # Format the full prompt
+            prompt = format_conversation(
+                initial_context,
+                session.conversation_history,
+                current_feedback
             )
 
-            # Handle tool use
-            while response.stop_reason == "tool_use":
-                tool_results = []
+            # Call Claude CLI
+            print("Calling Claude CLI...")
+            response_text = call_claude_cli(prompt, timeout=600)
 
-                for block in response.content:
-                    if block.type == "tool_use":
-                        print(f"  Tool: {block.name}")
-                        if mcp:
-                            result = mcp.execute_tool(block.name, block.input)
-                        else:
-                            result = json.dumps({"error": "MCP not available"})
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result
-                        })
-
-                # Continue conversation with tool results
-                session.messages.append({"role": "assistant", "content": response.content})
-                session.messages.append({"role": "user", "content": tool_results})
-
-                response = client.messages.create(
-                    model=MODELS["coding"],
-                    max_tokens=8192,
-                    tools=tools if tools else None,
-                    messages=session.messages
-                )
-
-            # Extract response text
-            response_text = extract_text_from_response(response)
             print(f"\nResponse preview: {response_text[:500]}...")
 
             # Record iteration
@@ -302,6 +320,12 @@ def run_feature_loop(
                 iteration=iteration,
                 response_summary=response_text[:1000]
             )
+
+            # Add response to history
+            session.conversation_history.append({
+                "type": "response",
+                "content": response_text
+            })
 
             # Check if agent claims completion
             if claims_completion(response_text):
@@ -312,7 +336,7 @@ def run_feature_loop(
                 record.verification_result = verification.reason
 
                 if verification.passed:
-                    print(f"✓ Feature test passes!")
+                    print("✓ Feature test passes!")
 
                     # Check pattern compliance before proceeding
                     print("Checking pattern compliance...")
@@ -322,15 +346,17 @@ def run_feature_loop(
                         print("✓ Pattern compliance OK")
                     except PatternViolation as e:
                         print(f"✗ Pattern violation: {e}")
-                        feedback = f"""Your changes violate established project patterns:
+                        current_feedback = f"""Your changes violate established project patterns:
 
 {e}
 
 You MUST fix these violations before the feature can be completed.
 Review specs/context/patterns.md for the required patterns.
 Modify your code to comply with the existing codebase conventions."""
-                        session.messages.append({"role": "assistant", "content": response.content})
-                        session.messages.append({"role": "user", "content": feedback})
+                        session.conversation_history.append({
+                            "type": "feedback",
+                            "content": current_feedback
+                        })
                         record.error = f"Pattern violation: {str(e)[:200]}"
                         session.iterations.append(record)
                         continue  # Let agent fix it
@@ -347,20 +373,24 @@ Modify your code to comply with the existing codebase conventions."""
                     else:
                         # Regression detected - feed back to agent
                         print(f"✗ Regression detected: {regression.failed_tests}")
-                        feedback = format_regression_feedback(regression, feature_id)
-                        session.messages.append({"role": "assistant", "content": response.content})
-                        session.messages.append({"role": "user", "content": feedback})
+                        current_feedback = format_regression_feedback(regression, feature_id)
+                        session.conversation_history.append({
+                            "type": "feedback",
+                            "content": current_feedback
+                        })
                         record.error = f"Regression: {regression.failed_tests}"
                 else:
                     # Verification failed - feed error back to agent
                     print(f"✗ Verification failed: {verification.reason}")
-                    feedback = format_verification_feedback(verification)
-                    session.messages.append({"role": "assistant", "content": response.content})
-                    session.messages.append({"role": "user", "content": feedback})
-                    record.error = verification.stderr[:500]
+                    current_feedback = format_verification_feedback(verification)
+                    session.conversation_history.append({
+                        "type": "feedback",
+                        "content": current_feedback
+                    })
+                    record.error = verification.stderr[:500] if verification.stderr else verification.reason
             else:
-                # Agent still working - continue conversation
-                session.messages.append({"role": "assistant", "content": response.content})
+                # Agent still working - no specific feedback needed
+                current_feedback = ""
 
             session.iterations.append(record)
 
@@ -371,16 +401,14 @@ Modify your code to comply with the existing codebase conventions."""
                 iteration=iteration,
                 error=str(e)
             ))
+            # Add error as feedback for next iteration
+            current_feedback = f"Error occurred: {e}\nPlease try again."
 
     print(f"\nMax iterations ({MAX_ITERATIONS_PER_FEATURE}) reached for {feature_id}")
     return False
 
 
-def run_feature_with_checkpoints(
-    feature: dict,
-    client: "anthropic.Anthropic",
-    mcp: Optional[MCPManager] = None
-) -> bool:
+def run_feature_with_checkpoints(feature: dict) -> bool:
     """
     Run a feature with git checkpoint/rollback support.
     """
@@ -392,7 +420,7 @@ def run_feature_with_checkpoints(
     session = FeatureSession(feature=feature, checkpoint=checkpoint)
 
     try:
-        success = run_feature_loop(session, client, mcp)
+        success = run_feature_loop(session)
 
         if success:
             # Run reflection to extract lessons
@@ -405,7 +433,7 @@ def run_feature_with_checkpoints(
                 }
                 for r in session.iterations
             ]
-            learnings = run_reflection(feature, iteration_history, client)
+            learnings = run_reflection(feature, iteration_history)
             if learnings:
                 save_learnings(learnings)
                 print(f"Extracted {len(learnings)} lessons for future agents")
@@ -426,12 +454,20 @@ def run_feature_with_checkpoints(
 def main():
     """Main entry point."""
     print("=" * 60)
-    print("AUTONOMOUS AGENT HARNESS - MCP-Native Loop")
+    print("AUTONOMOUS AGENT HARNESS - CLI-Native Loop")
     print("=" * 60)
 
-    # Verify prerequisites
-    if not HAS_ANTHROPIC:
-        print("ERROR: anthropic SDK required. Run: pip install anthropic")
+    # Verify Claude CLI is available
+    try:
+        subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            check=True,
+            timeout=10
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        print("ERROR: 'claude' CLI not found or not working.")
+        print("Install it: npm install -g @anthropic-ai/claude-code")
         return 1
 
     # Ensure git repo exists
@@ -439,20 +475,7 @@ def main():
         print("ERROR: Could not initialize git repository")
         return 1
 
-    # Initialize Anthropic client
-    client = anthropic.Anthropic()
-
-    # Initialize MCP servers
-    mcp = None
-    try:
-        mcp = MCPManager.from_config()
-        tools = mcp.get_all_tools()
-        print(f"MCP servers loaded: {len(tools)} tools available")
-    except FileNotFoundError:
-        print("Warning: No MCP config found. Running without tool execution.")
-    except Exception as e:
-        print(f"Warning: MCP initialization failed: {e}")
-        print("Running without tool execution.")
+    print("Claude CLI ready")
 
     try:
         # Main loop
@@ -494,7 +517,7 @@ def main():
                 update_feature_status(feature["id"], "in_progress")
 
             # Run the feature
-            success = run_feature_with_checkpoints(feature, client, mcp)
+            success = run_feature_with_checkpoints(feature)
 
             if success:
                 update_feature_status(feature["id"], "passing")
@@ -504,9 +527,6 @@ def main():
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
         return 130
-    finally:
-        if mcp:
-            mcp.shutdown()
 
 
 if __name__ == "__main__":

@@ -161,12 +161,8 @@ npm install --save-dev @anthropic-ai/mcp-server-playwright @anthropic-ai/mcp-ser
     log_warn "Some MCP servers failed to install (they may not be published yet)"
 }
 
-# Install Python dependencies
-log_info "Installing Python dependencies..."
-pip3 install anthropic --quiet 2>/dev/null || pip install anthropic --quiet 2>/dev/null || {
-    log_warn "Could not install anthropic SDK. Run: pip install anthropic"
-}
-log_success "Python dependencies installed"
+# Note: No Python dependencies needed - harness uses Claude CLI for all LLM calls
+log_success "Dependencies installed"
 
 # Create Playwright config if missing
 if [[ ! -f "playwright.config.ts" ]]; then
@@ -212,7 +208,7 @@ log_success "Agent Harness installed successfully!"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "  1. Set ANTHROPIC_API_KEY environment variable"
+echo "  1. Ensure Claude CLI is installed: npm install -g @anthropic-ai/claude-code"
 echo "  2. Specify your product: python3 harness/architect.py new \"Your idea\""
 echo "  3. Run the coding loop: python3 harness/coding/loop.py"
 echo ""
