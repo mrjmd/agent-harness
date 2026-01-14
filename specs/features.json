@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Features Backlog",
+  "description": "State machine tracking autonomous agent progress through features",
+  "features": [
+    {
+      "id": "example-001",
+      "description": "Example feature - replace with your first feature",
+      "status": "todo",
+      "test_file": "tests/e2e/test_example-001.spec.ts",
+      "priority": 1,
+      "created_at": "2026-01-13T00:00:00Z",
+      "last_updated": null,
+      "retries": 0,
+      "blocked": false,
+      "block_reason": null,
+      "notes": "Delete this example and add your real features"
+    }
+  ],
+  "_schema": {
+    "feature": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier (kebab-case recommended)",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Granular, testable task description",
+        "required": true
+      },
+      "status": {
+        "type": "string",
+        "enum": ["todo", "in_progress", "failing", "passing"],
+        "description": "Current state in the workflow",
+        "required": true
+      },
+      "test_file": {
+        "type": "string",
+        "description": "Path to the Playwright test file for this feature",
+        "required": true
+      },
+      "priority": {
+        "type": "integer",
+        "description": "Execution order (lower = higher priority)",
+        "required": false
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "ISO 8601 timestamp of creation",
+        "required": false
+      },
+      "last_updated": {
+        "type": "string",
+        "format": "date-time",
+        "description": "ISO 8601 timestamp of last status change",
+        "required": false
+      },
+      "retries": {
+        "type": "integer",
+        "description": "Number of failed attempts",
+        "required": false
+      },
+      "blocked": {
+        "type": "boolean",
+        "description": "Whether the feature is blocked and should be skipped",
+        "required": false
+      },
+      "block_reason": {
+        "type": "string",
+        "description": "Explanation of why the feature is blocked",
+        "required": false
+      },
+      "notes": {
+        "type": "string",
+        "description": "Additional context or implementation hints",
+        "required": false
+      }
+    }
+  }
+}

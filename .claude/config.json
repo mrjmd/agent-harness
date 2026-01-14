@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@anthropic-ai/mcp-server-playwright"],
+      "description": "Browser automation for E2E testing"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "@anthropic-ai/mcp-server-filesystem",
+        "--root",
+        "."
+      ],
+      "description": "File system operations within project root"
+    },
+    "git": {
+      "command": "npx",
+      "args": ["@anthropic-ai/mcp-server-git"],
+      "description": "Git operations for version control"
+    }
+  },
+  "settings": {
+    "autoCommit": false,
+    "requireTestPass": true,
+    "maxRetries": 5,
+    "testCommand": "npx playwright test",
+    "testTimeout": 60000
+  }
+}
