@@ -33,6 +33,7 @@ SPECS_DIR = Path("specs")
 SESSION_PATH = SPECS_DIR / "session.json"
 FEATURES_PATH = SPECS_DIR / "features.json"
 TECH_PLAN_PATH = SPECS_DIR / "tech_plan.md"
+HEALTH_REPORT_PATH = SPECS_DIR / "health_report.md"
 
 # Gate definitions
 GATES = ["problem", "solution", "technical", "edges", "synthesis", "complete"]
@@ -709,7 +710,57 @@ def build_context(state: SpecificationState) -> str:
             edge_count = len(f.get("edge_cases", []))
             context_parts.append(f"  - {f.get('id', '?')}: {edge_count} edge cases")
 
+    # Include health report context if available (brownfield projects)
+    if HEALTH_REPORT_PATH.exists():
+        context_parts.append(_extract_health_context())
+
     return "\n".join(context_parts)
+
+
+def _extract_health_context() -> str:
+    """Extract relevant context from health report for the Architect."""
+    try:
+        content = HEALTH_REPORT_PATH.read_text()
+        context_parts = ["\n## Known Issues from Health Report"]
+
+        # Extract documented issues section
+        if "## Documented Issues" in content:
+            start = content.find("## Documented Issues")
+            end = content.find("\n## ", start + 1)
+            if end == -1:
+                end = len(content)
+            issues_section = content[start:end].strip()
+            # Limit to first 10 lines
+            lines = issues_section.split("\n")[:12]
+            context_parts.append("\n".join(lines))
+
+        # Extract code annotations summary
+        if "## Code Annotations" in content:
+            start = content.find("## Code Annotations")
+            end = content.find("\n## ", start + 1)
+            if end == -1:
+                end = len(content)
+            annotations_section = content[start:end].strip()
+            lines = annotations_section.split("\n")[:12]
+            context_parts.append("\n".join(lines))
+
+        # Extract external services
+        if "## External Services" in content:
+            start = content.find("## External Services")
+            end = content.find("\n## ", start + 1)
+            if end == -1:
+                end = len(content)
+            services_section = content[start:end].strip()
+            lines = services_section.split("\n")[:10]
+            context_parts.append("\n".join(lines))
+
+        if len(context_parts) > 1:
+            return "\n".join(context_parts)
+
+    except IOError:
+        pass
+
+    return ""
 
 
 def run_repl(state: SpecificationState) -> None:
@@ -891,9 +942,40 @@ def cmd_new(product_idea: str) -> int:
             print("Aborted. Use 'resume' to continue existing session.")
             return 0
 
-    # Auto-detect brownfield project and extract patterns
-    if Path("src").exists() or Path("package.json").exists():
-        print("Existing codebase detected. Extracting patterns...")
+    # Phase 0: Run Doctor health check for brownfield projects
+    if Path("src").exists() or Path("package.json").exists() or Path("requirements.txt").exists():
+        print("Existing codebase detected.")
+
+        # Run health diagnosis if not already done
+        if not HEALTH_REPORT_PATH.exists():
+            print("\nRunning health diagnosis (Phase 0)...")
+            try:
+                from doctor import cmd_diagnose
+                cmd_diagnose()
+            except ImportError:
+                print("Warning: doctor module not found, skipping health check")
+            except Exception as e:
+                print(f"Warning: Health check failed: {e}")
+
+        # Check health status and soft-block if critical
+        if HEALTH_REPORT_PATH.exists():
+            health_content = HEALTH_REPORT_PATH.read_text()
+            if "CRITICAL" in health_content:
+                print("\n" + "=" * 60)
+                print("PROJECT HEALTH: CRITICAL")
+                print("=" * 60)
+                print("\nThe health report indicates critical issues that should be")
+                print("addressed before adding new features.")
+                print("\nRecommended: Run 'python harness/doctor.py stabilize' first.")
+                print("")
+                response = input("Proceed anyway? (y/N): ").strip().lower()
+                if response != "y":
+                    print("\nRun 'python harness/doctor.py stabilize' to generate fix tasks.")
+                    return 0
+                print("\nProceeding with caution...")
+
+        # Extract patterns
+        print("\nExtracting codebase patterns...")
         try:
             from archaeologist import run_extraction
             run_extraction()

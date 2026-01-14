@@ -67,8 +67,10 @@ log_success "Copied .claude/"
 # Copy architect (specification harness)
 cp "$HARNESS_ROOT/harness/architect.py" harness/
 cp "$HARNESS_ROOT/harness/archaeologist.py" harness/
+cp "$HARNESS_ROOT/harness/doctor.py" harness/
 log_success "Copied harness/architect.py"
 log_success "Copied harness/archaeologist.py"
+log_success "Copied harness/doctor.py"
 
 # Copy coding harness (execution loop)
 cp "$HARNESS_ROOT/harness/coding/loop.py" harness/coding/
@@ -138,6 +140,11 @@ if [[ ! -f "package.json" ]]; then
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
+    "doctor": "python3 harness/doctor.py",
+    "doctor:diagnose": "python3 harness/doctor.py diagnose",
+    "doctor:stabilize": "python3 harness/doctor.py stabilize",
+    "doctor:baseline": "python3 harness/doctor.py baseline",
+    "doctor:fixtures": "python3 harness/doctor.py fixtures",
     "spec": "python3 harness/architect.py",
     "spec:new": "python3 harness/architect.py new",
     "spec:resume": "python3 harness/architect.py resume",
@@ -209,10 +216,14 @@ echo "=========================================="
 echo ""
 echo "Next steps:"
 echo "  1. Ensure Claude CLI is installed: npm install -g @anthropic-ai/claude-code"
-echo "  2. Specify your product: python3 harness/architect.py new \"Your idea\""
-echo "  3. Run the coding loop: python3 harness/coding/loop.py"
+echo "  2. Run health check (brownfield): python3 harness/doctor.py"
+echo "  3. Specify your product: python3 harness/architect.py new \"Your idea\""
+echo "  4. Run the coding loop: python3 harness/coding/loop.py"
 echo ""
 echo "Files created:"
+echo ""
+echo "  Phase 0 (Health Check):"
+echo "    harness/doctor.py         - Brownfield health audit & stabilization"
 echo ""
 echo "  Specification Harness:"
 echo "    harness/architect.py      - Socratic specification REPL"
@@ -235,10 +246,12 @@ echo "    specs/learnings.json    - Accumulated lessons"
 echo "    playwright.config.ts    - Playwright configuration"
 echo ""
 echo "Key features:"
+echo "  - Brownfield Doctor: Health audit before building on existing code"
 echo "  - Five Gates: Adversarial specification before any code"
 echo "  - External verification: Harness runs tests, not the agent"
 echo "  - Git checkpoints: Commit on green, rollback on red"
 echo "  - Regression fence: All tests must pass before feature completes"
 echo "  - Reflection: Lessons learned persist for future agents"
-echo "  - Brownfield support: Pattern extraction and enforcement"
+echo "  - Pattern enforcement: Extracts and enforces codebase conventions"
+echo "  - Webhook fixtures: Scaffold for testing external integrations"
 echo ""
