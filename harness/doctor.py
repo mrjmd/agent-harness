@@ -632,7 +632,7 @@ def scan_code_annotations() -> list[AnnotationMatch]:
     extensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".rb"]
 
     # Directories to skip
-    skip_dirs = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv"}
+    skip_dirs = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "harness"}
 
     for ext in extensions:
         for file_path in Path(".").rglob(f"*{ext}"):
@@ -673,7 +673,7 @@ def detect_external_services() -> list[ExternalServiceDetection]:
 
     # File extensions to scan
     extensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".env", ".env.example"]
-    skip_dirs = {"node_modules", ".git", "dist", "build"}
+    skip_dirs = {"node_modules", ".git", "dist", "build", "harness"}
 
     for service_name, service_info in EXTERNAL_SERVICES.items():
         files_found = set()
