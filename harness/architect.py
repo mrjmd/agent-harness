@@ -27,6 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Review Board (Bicameral Mind)
+try:
+    from review_board import should_review, request_review, run_review_loop
+    REVIEW_BOARD_AVAILABLE = True
+except ImportError:
+    REVIEW_BOARD_AVAILABLE = False
+
 
 # Paths
 SPECS_DIR = Path("specs")
@@ -828,6 +835,44 @@ def run_repl(state: SpecificationState) -> None:
             # Check for gate completion
             next_phase = extract_gate_completion(assistant_message)
             if next_phase:
+                # Review Board: Trigger adversarial review after Gate 3 (Technical Plan)
+                if state.phase == "technical" and next_phase == "edges":
+                    if REVIEW_BOARD_AVAILABLE and should_review("architect"):
+                        print(f"\n{'=' * 40}")
+                        print("REVIEW BOARD: Technical Plan Review")
+                        print(f"{'=' * 40}")
+
+                        # Get the tech plan content
+                        tech_plan_content = ""
+                        if TECH_PLAN_PATH.exists():
+                            tech_plan_content = TECH_PLAN_PATH.read_text()
+
+                        # Build context for reviewer
+                        review_context = {
+                            "product": state.product_idea,
+                            "problem": state.problem_statement[:500] if state.problem_statement else "",
+                            "approach": state.chosen_approach.get("description", "")[:300] if state.chosen_approach else "",
+                        }
+
+                        result = request_review(
+                            stage="architect",
+                            context=review_context,
+                            output=tech_plan_content
+                        )
+
+                        if not result.approved:
+                            # Feed reviewer feedback back into the conversation
+                            print("\n[REVIEW BOARD] Review rejected. Addressing feedback...")
+                            state.messages.append({
+                                "role": "system",
+                                "content": f"REVIEWER VETO:\n{result.feedback}\n\nAddress these concerns before proceeding to edge cases."
+                            })
+                            # Don't advance phase - stay in technical
+                            save_state(state)
+                            continue
+                        else:
+                            print("\n[REVIEW BOARD] Technical plan approved.")
+
                 state.phase = next_phase
                 print(f"\n{'=' * 40}")
                 print(f"ADVANCING TO: {state.phase.upper()}")

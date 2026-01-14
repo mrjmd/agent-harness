@@ -3,7 +3,9 @@
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@anthropic-ai/mcp-server-playwright"],
+      "args": [
+        "@anthropic-ai/mcp-server-playwright"
+      ],
       "description": "Browser automation for E2E testing"
     },
     "filesystem": {
@@ -17,7 +19,9 @@
     },
     "git": {
       "command": "npx",
-      "args": ["@anthropic-ai/mcp-server-git"],
+      "args": [
+        "@anthropic-ai/mcp-server-git"
+      ],
       "description": "Git operations for version control"
     }
   },
@@ -27,5 +31,33 @@
     "maxRetries": 5,
     "testCommand": "npx playwright test",
     "testTimeout": 60000
+  },
+  "reviewBoard": {
+    "enabled": false,
+    "provider": "manual",
+    "maxCycles": 3,
+    "criticalPaths": [
+      "src/auth/**/*",
+      "src/payment/**/*",
+      "api/security/**/*",
+      "**/middleware/auth*",
+      "**/*webhook*",
+      "**/webhooks/**/*",
+      "**/security*"
+    ],
+    "stages": {
+      "architect": {
+        "required": true
+      },
+      "implementer": {
+        "triggerOn": "criticalPaths"
+      },
+      "doctor": {
+        "required": false
+      },
+      "archaeologist": {
+        "required": false
+      }
+    }
   }
 }

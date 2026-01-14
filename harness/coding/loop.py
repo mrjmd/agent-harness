@@ -41,6 +41,16 @@ from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
 from review import enforce_patterns, PatternViolation, get_modified_files
 
+# Review Board (Bicameral Mind)
+try:
+    # Import from parent directory
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from review_board import should_review, request_review, check_critical_paths
+    REVIEW_BOARD_AVAILABLE = True
+except ImportError:
+    REVIEW_BOARD_AVAILABLE = False
+
 
 # Configuration
 FEATURES_PATH = Path("specs/features.json")
@@ -390,6 +400,62 @@ Modify your code to comply with the existing codebase conventions."""
                     regression = regression_check()
 
                     if regression.passed:
+                        # Review Board: Check if cross-model review is needed
+                        if REVIEW_BOARD_AVAILABLE and should_review("implementer", modified_files):
+                            print("\n" + "=" * 40)
+                            print("REVIEW BOARD: Code Review Required")
+                            print("=" * 40)
+
+                            # Show which files triggered the review
+                            critical_matches = check_critical_paths(modified_files)
+                            if critical_matches:
+                                print("\nCritical files modified:")
+                                for file, pattern in critical_matches:
+                                    print(f"  - {file} (matched: {pattern})")
+
+                            # Get the diff for review
+                            try:
+                                diff_result = subprocess.run(
+                                    ["git", "diff", "--staged"],
+                                    capture_output=True,
+                                    text=True
+                                )
+                                diff_content = diff_result.stdout or "(no staged changes)"
+                            except Exception:
+                                diff_content = "(could not get diff)"
+
+                            # Build context for reviewer
+                            review_context = {
+                                "feature_id": feature_id,
+                                "description": feature.get("description", ""),
+                                "acceptance_criteria": feature.get("acceptance_criteria", ""),
+                                "files_modified": ", ".join(modified_files[:10]),
+                            }
+
+                            result = request_review(
+                                stage="implementer",
+                                context=review_context,
+                                output=diff_content
+                            )
+
+                            if not result.approved:
+                                print("\n[REVIEW BOARD] Review rejected. Addressing feedback...")
+                                current_feedback = f"""REVIEWER VETO:
+
+{result.feedback}
+
+You MUST address these review comments before the feature can be committed.
+Make the necessary changes and ensure they pass verification again."""
+                                session.conversation_history.append({
+                                    "type": "feedback",
+                                    "content": current_feedback
+                                })
+                                record.error = f"Review rejected: {result.feedback[:200]}"
+                                session.iterations.append(record)
+                                continue  # Go back to let agent fix issues
+                            else:
+                                print("\n[REVIEW BOARD] Code review approved.")
+
                         print("✓ All tests pass! Committing...")
                         commit_feature(feature_id, feature.get("description", ""))
                         session.iterations.append(record)
