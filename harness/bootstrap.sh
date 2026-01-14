@@ -58,21 +58,28 @@ fi
 log_info "Copying harness files..."
 
 # Create directories
-mkdir -p .claude harness/templates specs tests/e2e
+mkdir -p .claude harness/coding harness/templates specs tests/e2e
 
 # Copy .claude directory
 cp -r "$HARNESS_ROOT/.claude/"* .claude/ 2>/dev/null || true
 log_success "Copied .claude/"
 
-# Copy harness directory (all Python modules)
-cp "$HARNESS_ROOT/harness/loop.py" harness/
-cp "$HARNESS_ROOT/harness/mcp_manager.py" harness/
-cp "$HARNESS_ROOT/harness/verify.py" harness/
-cp "$HARNESS_ROOT/harness/git_utils.py" harness/
-cp "$HARNESS_ROOT/harness/repo_map.py" harness/
-cp "$HARNESS_ROOT/harness/reflection.py" harness/
+# Copy architect (specification harness)
+cp "$HARNESS_ROOT/harness/architect.py" harness/
+cp "$HARNESS_ROOT/harness/archaeologist.py" harness/
+log_success "Copied harness/architect.py"
+log_success "Copied harness/archaeologist.py"
+
+# Copy coding harness (execution loop)
+cp "$HARNESS_ROOT/harness/coding/loop.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/mcp_manager.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/verify.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/git_utils.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/repo_map.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/reflection.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/review.py" harness/coding/
 cp -r "$HARNESS_ROOT/harness/templates/"* harness/templates/ 2>/dev/null || true
-log_success "Copied harness/"
+log_success "Copied harness/coding/"
 
 # Copy specs templates
 if [[ ! -f "specs/features.json" ]]; then
@@ -131,7 +138,11 @@ if [[ ! -f "package.json" ]]; then
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
-    "agent:loop": "python3 harness/loop.py"
+    "spec": "python3 harness/architect.py",
+    "spec:new": "python3 harness/architect.py new",
+    "spec:resume": "python3 harness/architect.py resume",
+    "spec:audit": "python3 harness/architect.py audit",
+    "agent:loop": "python3 harness/coding/loop.py"
   },
   "devDependencies": {}
 }
@@ -202,25 +213,36 @@ echo "=========================================="
 echo ""
 echo "Next steps:"
 echo "  1. Set ANTHROPIC_API_KEY environment variable"
-echo "  2. Edit specs/features.json to define your features"
-echo "  3. Run: python3 harness/loop.py"
+echo "  2. Specify your product: python3 harness/architect.py new \"Your idea\""
+echo "  3. Run the coding loop: python3 harness/coding/loop.py"
 echo ""
 echo "Files created:"
-echo "  .claude/CLAUDE.md       - Agent constitution"
-echo "  .claude/config.json     - MCP server configuration"
-echo "  harness/loop.py         - Main orchestration loop"
-echo "  harness/mcp_manager.py  - MCP server lifecycle"
-echo "  harness/verify.py       - External test verification"
-echo "  harness/git_utils.py    - Git checkpoint/rollback"
-echo "  harness/repo_map.py     - Codebase structure mapping"
-echo "  harness/reflection.py   - Knowledge transfer"
-echo "  specs/features.json     - Feature backlog"
-echo "  specs/learnings.json    - Accumulated lessons"
-echo "  playwright.config.ts    - Playwright configuration"
+echo ""
+echo "  Specification Harness:"
+echo "    harness/architect.py      - Socratic specification REPL"
+echo "    harness/archaeologist.py  - Pattern extraction for brownfield"
+echo ""
+echo "  Coding Harness:"
+echo "    harness/coding/loop.py         - Main orchestration loop"
+echo "    harness/coding/mcp_manager.py  - MCP server lifecycle"
+echo "    harness/coding/verify.py       - External test verification"
+echo "    harness/coding/git_utils.py    - Git checkpoint/rollback"
+echo "    harness/coding/repo_map.py     - Codebase structure mapping"
+echo "    harness/coding/reflection.py   - Knowledge transfer"
+echo "    harness/coding/review.py       - Pattern enforcement"
+echo ""
+echo "  Configuration:"
+echo "    .claude/CLAUDE.md       - Agent constitution"
+echo "    .claude/config.json     - MCP server configuration"
+echo "    specs/features.json     - Feature backlog (shared contract)"
+echo "    specs/learnings.json    - Accumulated lessons"
+echo "    playwright.config.ts    - Playwright configuration"
 echo ""
 echo "Key features:"
+echo "  - Five Gates: Adversarial specification before any code"
 echo "  - External verification: Harness runs tests, not the agent"
 echo "  - Git checkpoints: Commit on green, rollback on red"
 echo "  - Regression fence: All tests must pass before feature completes"
 echo "  - Reflection: Lessons learned persist for future agents"
+echo "  - Brownfield support: Pattern extraction and enforcement"
 echo ""

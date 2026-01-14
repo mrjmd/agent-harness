@@ -39,6 +39,7 @@ from git_utils import (
 )
 from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
+from review import enforce_patterns, PatternViolation, get_modified_files
 
 # Anthropic SDK
 try:
@@ -83,15 +84,65 @@ class FeatureSession:
     checkpoint: str = ""
 
 
+def validate_feature(feature: dict) -> list[str]:
+    """
+    Validate a feature against the shared schema.
+    Returns a list of warnings/errors.
+    """
+    warnings = []
+    feature_id = feature.get("id", "unknown")
+
+    # Required fields
+    required = ["id", "description", "acceptance_criteria", "edge_cases", "priority"]
+    for field in required:
+        if field not in feature:
+            warnings.append(f"[{feature_id}] Missing required field: {field}")
+
+    # Edge cases validation (Rule of 3)
+    edge_cases = feature.get("edge_cases", [])
+    if len(edge_cases) < 3:
+        warnings.append(f"[{feature_id}] Only {len(edge_cases)} edge cases (minimum 3 required)")
+
+    for i, ec in enumerate(edge_cases):
+        if not ec.get("id"):
+            warnings.append(f"[{feature_id}] Edge case {i} missing 'id'")
+        if not ec.get("expected_behavior"):
+            warnings.append(f"[{feature_id}] Edge case {i} missing 'expected_behavior'")
+
+    # Falsifiability check (basic heuristic)
+    desc = feature.get("description", "")
+    vague_patterns = ["can ", "should ", "will be able to", "allows ", "enables "]
+    for pattern in vague_patterns:
+        if pattern in desc.lower():
+            warnings.append(f"[{feature_id}] Description may not be falsifiable (contains '{pattern.strip()}')")
+            break
+
+    return warnings
+
+
 def load_features() -> dict:
     """Load the features backlog from specs/features.json."""
     if not FEATURES_PATH.exists():
         print(f"ERROR: {FEATURES_PATH} not found.")
-        print("Create specs/features.json with at least one feature.")
+        print("Run 'python harness/architect.py new \"your idea\"' first.")
         sys.exit(1)
 
     with open(FEATURES_PATH) as f:
         data = json.load(f)
+
+    # Validate all features
+    all_warnings = []
+    for feature in data.get("features", []):
+        warnings = validate_feature(feature)
+        all_warnings.extend(warnings)
+
+    if all_warnings:
+        print("\n" + "=" * 60)
+        print("FEATURE VALIDATION WARNINGS")
+        print("=" * 60)
+        for warning in all_warnings:
+            print(f"  ⚠ {warning}")
+        print("=" * 60 + "\n")
 
     return data
 
@@ -102,25 +153,46 @@ def save_features(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def check_dependencies_met(feature: dict, features: list[dict]) -> bool:
+    """Check if all dependencies for a feature are passing."""
+    depends_on = feature.get("depends_on", [])
+    if not depends_on:
+        return True
+
+    # Build a map of feature statuses
+    status_map = {f.get("id"): f.get("status") for f in features}
+
+    for dep_id in depends_on:
+        if status_map.get(dep_id) != "passing":
+            return False
+
+    return True
+
+
 def find_next_feature(features: list[dict]) -> Optional[dict]:
     """Find the next feature to work on (in_progress > failing > todo)."""
+    # Sort by priority if available
+    sorted_features = sorted(features, key=lambda f: f.get("priority", 99))
+
     # First, look for in_progress
-    for feature in features:
+    for feature in sorted_features:
         if feature.get("status") == "in_progress":
             return feature
 
     # Then, look for failing (needs retry)
-    for feature in features:
+    for feature in sorted_features:
         if feature.get("status") == "failing":
             if feature.get("retries", 0) < MAX_RETRIES_PER_FEATURE:
                 if not feature.get("blocked"):
-                    return feature
+                    if check_dependencies_met(feature, features):
+                        return feature
 
-    # Finally, look for todo
-    for feature in features:
+    # Finally, look for todo (respecting priority and dependencies)
+    for feature in sorted_features:
         if feature.get("status") == "todo":
             if not feature.get("blocked"):
-                return feature
+                if check_dependencies_met(feature, features):
+                    return feature
 
     return None
 
@@ -241,6 +313,27 @@ def run_feature_loop(
 
                 if verification.passed:
                     print(f"✓ Feature test passes!")
+
+                    # Check pattern compliance before proceeding
+                    print("Checking pattern compliance...")
+                    try:
+                        modified_files = get_modified_files()
+                        enforce_patterns(modified_files)
+                        print("✓ Pattern compliance OK")
+                    except PatternViolation as e:
+                        print(f"✗ Pattern violation: {e}")
+                        feedback = f"""Your changes violate established project patterns:
+
+{e}
+
+You MUST fix these violations before the feature can be completed.
+Review specs/context/patterns.md for the required patterns.
+Modify your code to comply with the existing codebase conventions."""
+                        session.messages.append({"role": "assistant", "content": response.content})
+                        session.messages.append({"role": "user", "content": feedback})
+                        record.error = f"Pattern violation: {str(e)[:200]}"
+                        session.iterations.append(record)
+                        continue  # Let agent fix it
 
                     # Run regression check before final commit
                     print("Running regression check...")

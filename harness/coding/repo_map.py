@@ -31,6 +31,9 @@ CODE_PATTERNS = [
     "**/*.scss",
 ]
 
+# Patterns file for brownfield projects
+PATTERNS_PATH = Path("specs/context/patterns.md")
+
 # Directories to exclude
 EXCLUDE_DIRS = {
     "node_modules",
@@ -232,6 +235,18 @@ def build_feature_context(
 
     sections = []
 
+    # 0. BROWNFIELD PATTERNS (highest priority - if exists)
+    if PATTERNS_PATH.exists():
+        sections.append("# BROWNFIELD PROJECT - IMMUTABLE PATTERNS")
+        sections.append("""
+⚠️ WARNING: You are working in an EXISTING codebase.
+The following patterns are IMMUTABLE. You MUST follow them exactly.
+Consistency is more important than your preferences.
+DO NOT introduce new libraries, patterns, or conventions.
+""")
+        sections.append(PATTERNS_PATH.read_text())
+        sections.append("\n---\n")
+
     # 1. Constitution
     if constitution_path.exists():
         sections.append("# CONSTITUTION")
@@ -244,6 +259,27 @@ def build_feature_context(
     # 3. Current Feature
     sections.append("\n# YOUR CURRENT FEATURE")
     sections.append(json.dumps(feature, indent=2))
+
+    # 3a. File scope restrictions (if any)
+    file_scope = feature.get("file_scope")
+    if file_scope:
+        sections.append("\n## FILE SCOPE RESTRICTIONS")
+        if file_scope.get("create"):
+            sections.append(f"Files you SHOULD CREATE: {', '.join(file_scope['create'])}")
+        if file_scope.get("modify"):
+            sections.append(f"Files you MAY MODIFY: {', '.join(file_scope['modify'])}")
+        if file_scope.get("forbidden"):
+            sections.append(f"Files you MUST NOT TOUCH: {', '.join(file_scope['forbidden'])}")
+        sections.append("\nViolating file scope will cause the harness to reject your changes.")
+
+    # 3b. Edge cases to handle
+    edge_cases = feature.get("edge_cases", [])
+    if edge_cases:
+        sections.append("\n## EDGE CASES TO HANDLE")
+        sections.append("Your implementation must handle these edge cases:")
+        for ec in edge_cases:
+            sections.append(f"- [{ec.get('id', '?')}] {ec.get('description', '')}")
+            sections.append(f"  Expected: {ec.get('expected_behavior', 'not specified')}")
 
     # 4. Relevant Learnings
     if learnings_path.exists():
