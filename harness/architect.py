@@ -3,13 +3,14 @@
 Socratic Architect - Adversarial Specification System
 
 This script interrogates users to eliminate specification ambiguity before
-any code is written. It enforces the Five Gates model:
+any code is written. It enforces the Six Gates model:
 
 1. Problem Discovery - WHY, not HOW
 2. Solution Space - explore 3+ alternatives
 3. Technical Design - lock down architecture
 4. Edge Cases - 3+ per feature (Rule of 3)
 5. Synthesis - generate features.json
+6. Refinement - review/reorder backlog before coding
 
 The key insight: Garbage specs -> garbage code.
 This system refuses to generate specs until ambiguity is eliminated.
@@ -63,7 +64,7 @@ GATE_4_PATH = SPECS_DIR / "gate-4-edge-cases.md"
 TECH_PLAN_PATH = GATE_3_PATH  # Alias for backwards compatibility
 
 # Gate definitions
-GATES = ["problem", "solution", "technical", "edges", "synthesis", "complete"]
+GATES = ["problem", "solution", "technical", "edges", "synthesis", "refinement", "complete"]
 
 # Context window management
 MAX_HISTORY_MESSAGES = 20  # Keep at most this many recent messages verbatim
@@ -490,6 +491,27 @@ BLOCKERS: [count]
 Only generate features.json when ALL checks pass.
 
 When ready, generate the JSON and say: "GATE 5 COMPLETE. Specification saved to specs/features.json"
+""",
+
+    "refinement": """## GATE 6: Backlog Refinement
+
+Review the generated feature backlog before coding begins.
+
+COMMANDS (type these directly):
+- `list` - Show all features with IDs and priorities
+- `split <id>` - Break a feature into smaller pieces
+- `reorder <id> <new_priority>` - Change feature priority
+- `drop <id>` - Remove a feature from backlog
+- `refine <id>` - Edit feature description/criteria
+- `finalize` - Lock backlog and proceed to coding
+
+REVIEW CHECKLIST:
+- Dependencies: Does Feature 3 need Feature 1 first?
+- Granularity: Any feature >1 day? Split it.
+- Priorities: Is the order correct for MVP?
+
+Type `list` to see your features, then use commands to refine.
+When satisfied, type: `finalize`
 """
 }
 
@@ -631,6 +653,183 @@ def save_tech_plan(content: str) -> None:
 
 
 # =============================================================================
+# Gate 6: Refinement Commands
+# =============================================================================
+
+def display_feature_table(state: SpecificationState) -> None:
+    """Display features in a formatted table."""
+    if not state.features:
+        print("\nNo features defined yet.")
+        return
+
+    print("\n" + "=" * 70)
+    print("FEATURE BACKLOG")
+    print("=" * 70)
+    print(f"{'Pri':>3} | {'ID':<25} | {'Edge Cases':>10} | Description")
+    print("-" * 70)
+
+    for feature in sorted(state.features, key=lambda f: f.get("priority", 99)):
+        fid = feature.get("id", "unknown")[:25]
+        priority = feature.get("priority", 99)
+        edge_count = len(feature.get("edge_cases", []))
+        desc = feature.get("description", "")[:35]
+        print(f"{priority:>3} | {fid:<25} | {edge_count:>10} | {desc}...")
+
+    print("-" * 70)
+    print(f"Total: {len(state.features)} features")
+    print("\nCommands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+
+
+def handle_split_command(state: SpecificationState, cmd: str) -> None:
+    """Split a feature into smaller pieces using Claude."""
+    parts = cmd.split(maxsplit=1)
+    if len(parts) < 2:
+        print("Usage: split <feature-id>")
+        return
+
+    feature_id = parts[1].strip()
+    feature = next((f for f in state.features if f.get("id") == feature_id), None)
+
+    if not feature:
+        print(f"Feature '{feature_id}' not found.")
+        return
+
+    print(f"\nSplitting feature: {feature_id}")
+    print("(Consulting Claude for decomposition...)")
+
+    # Ask Claude to suggest split
+    split_prompt = f"""Decompose this feature into 2-3 smaller, independently-implementable features.
+
+FEATURE TO SPLIT:
+ID: {feature.get('id')}
+Description: {feature.get('description')}
+Acceptance Criteria: {feature.get('acceptance_criteria')}
+Edge Cases: {json.dumps(feature.get('edge_cases', []), indent=2)}
+
+RULES:
+1. Each sub-feature must be completable in <1 day
+2. Each needs its own acceptance criteria
+3. Distribute edge cases appropriately
+4. Use IDs like "{feature_id}-a", "{feature_id}-b"
+
+Output as JSON array of features (same schema as input).
+"""
+
+    try:
+        response = call_claude_cli(split_prompt)
+
+        # Try to extract features from response
+        new_features = extract_features_json(response)
+        if new_features and len(new_features) > 1:
+            # Remove original feature
+            state.features = [f for f in state.features if f.get("id") != feature_id]
+            # Add split features with incrementing priorities
+            base_priority = feature.get("priority", 99)
+            for i, nf in enumerate(new_features):
+                nf["priority"] = base_priority + i * 0.1
+                nf["status"] = "todo"
+                state.features.append(nf)
+
+            print(f"\nSplit into {len(new_features)} features:")
+            for nf in new_features:
+                print(f"  - {nf.get('id')}: {nf.get('description', '')[:50]}...")
+
+            save_features(state)
+        else:
+            print("\nCouldn't parse split suggestion. Claude's response:")
+            print(response[:500])
+            print("\nTry manual split or refine the feature instead.")
+
+    except Exception as e:
+        print(f"\nError during split: {e}")
+
+
+def handle_reorder_command(state: SpecificationState, cmd: str) -> None:
+    """Change a feature's priority."""
+    parts = cmd.split()
+    if len(parts) < 3:
+        print("Usage: reorder <feature-id> <new-priority>")
+        return
+
+    feature_id = parts[1]
+    try:
+        new_priority = int(parts[2])
+    except ValueError:
+        print("Priority must be an integer.")
+        return
+
+    feature = next((f for f in state.features if f.get("id") == feature_id), None)
+    if not feature:
+        print(f"Feature '{feature_id}' not found.")
+        return
+
+    old_priority = feature.get("priority", 99)
+    feature["priority"] = new_priority
+    save_features(state)
+    print(f"\nReordered '{feature_id}': priority {old_priority} -> {new_priority}")
+
+
+def handle_drop_command(state: SpecificationState, cmd: str) -> None:
+    """Remove a feature from the backlog."""
+    parts = cmd.split(maxsplit=1)
+    if len(parts) < 2:
+        print("Usage: drop <feature-id>")
+        return
+
+    feature_id = parts[1].strip()
+    feature = next((f for f in state.features if f.get("id") == feature_id), None)
+
+    if not feature:
+        print(f"Feature '{feature_id}' not found.")
+        return
+
+    print(f"\nDropping feature: {feature_id}")
+    print(f"  Description: {feature.get('description', '')[:60]}...")
+
+    confirm = input("Confirm drop? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    state.features = [f for f in state.features if f.get("id") != feature_id]
+    save_features(state)
+    print(f"Feature '{feature_id}' removed. {len(state.features)} features remaining.")
+
+
+def handle_refine_command(state: SpecificationState, cmd: str) -> None:
+    """Refine a specific feature's description/criteria."""
+    parts = cmd.split(maxsplit=1)
+    if len(parts) < 2:
+        print("Usage: refine <feature-id>")
+        return
+
+    feature_id = parts[1].strip()
+    feature = next((f for f in state.features if f.get("id") == feature_id), None)
+
+    if not feature:
+        print(f"Feature '{feature_id}' not found.")
+        return
+
+    print(f"\nRefining feature: {feature_id}")
+    print(f"  Current description: {feature.get('description', '')}")
+    print(f"  Current criteria: {feature.get('acceptance_criteria', '')}")
+    print(f"  Edge cases: {len(feature.get('edge_cases', []))}")
+
+    print("\nWhat would you like to change? (Enter to keep current)")
+
+    new_desc = input(f"  New description [{feature.get('description', '')[:40]}...]: ").strip()
+    if new_desc:
+        feature["description"] = new_desc
+
+    new_criteria = input(f"  New acceptance criteria [{feature.get('acceptance_criteria', '')[:40]}...]: ").strip()
+    if new_criteria:
+        feature["acceptance_criteria"] = new_criteria
+
+    save_features(state)
+    print(f"\nFeature '{feature_id}' updated.")
+
+
+# =============================================================================
 # Response Parsing
 # =============================================================================
 
@@ -645,7 +844,8 @@ def extract_gate_completion(response: str) -> Optional[str]:
         (r"(?:^|[.!?\n])\s*GATE 2 COMPLETE", "technical"),
         (r"(?:^|[.!?\n])\s*GATE 3 COMPLETE", "edges"),
         (r"(?:^|[.!?\n])\s*GATE 4 COMPLETE", "synthesis"),
-        (r"(?:^|[.!?\n])\s*GATE 5 COMPLETE", "complete"),
+        (r"(?:^|[.!?\n])\s*GATE 5 COMPLETE", "refinement"),  # Now goes to refinement
+        (r"(?:^|[.!?\n])\s*GATE 6 COMPLETE", "complete"),
     ]
 
     for pattern, next_phase in patterns:
@@ -883,6 +1083,13 @@ def run_repl(state: SpecificationState) -> None:
     print(f"\nCurrent phase: {state.phase.upper()}")
     print("Type 'quit' to save and exit, 'status' to see progress.\n")
 
+    # Show refinement instructions if starting in that phase
+    if state.phase == "refinement":
+        print("Backlog Refinement - Review your features before coding begins.")
+        print("Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+        print("")
+        display_feature_table(state)
+
     # Track pending questions from the last assistant message
     pending_questions: list[str] = []
 
@@ -908,6 +1115,60 @@ def run_repl(state: SpecificationState) -> None:
             print_status(state)
             continue
 
+        # Gate 6: Refinement commands (direct REPL commands, no Claude call)
+        if state.phase == "refinement":
+            cmd_lower = user_input.lower()
+
+            if cmd_lower == "list":
+                display_feature_table(state)
+                continue
+
+            if cmd_lower.startswith("split "):
+                handle_split_command(state, user_input)
+                save_state(state)
+                continue
+
+            if cmd_lower.startswith("reorder "):
+                handle_reorder_command(state, user_input)
+                save_state(state)
+                continue
+
+            if cmd_lower.startswith("drop "):
+                handle_drop_command(state, user_input)
+                save_state(state)
+                continue
+
+            if cmd_lower.startswith("refine "):
+                handle_refine_command(state, user_input)
+                save_state(state)
+                continue
+
+            if cmd_lower == "finalize":
+                if not state.features:
+                    print("\nCannot finalize: No features defined.")
+                    continue
+
+                print("\n" + "=" * 60)
+                print("FINALIZING BACKLOG")
+                print("=" * 60)
+                display_feature_table(state)
+                print("")
+                confirm = input("Lock this backlog and proceed to coding? (y/N): ").strip().lower()
+                if confirm == "y":
+                    state.phase = "complete"
+                    save_features(state)
+                    save_state(state)
+                    break
+                else:
+                    print("Cancelled. Continue refining or type 'finalize' when ready.")
+                continue
+
+            # If not a recognized command, show help
+            print(f"\nUnknown command: {user_input}")
+            print("Available commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+            print("Or type 'quit' to save and exit, 'status' to see progress.")
+            continue
+
         # Record Q&A from previous exchange if we had pending questions
         if MEMORY_AVAILABLE and pending_questions:
             # Take the most significant question (last one)
@@ -924,6 +1185,11 @@ def run_repl(state: SpecificationState) -> None:
         context = build_context(state)
         full_system = system + f"\n\n## Current Context\n{context}"
 
+        # Context window management - summarize BEFORE adding new messages
+        # This ensures the summarization call has headroom and doesn't fail
+        if len(state.messages) >= SUMMARY_TRIGGER_COUNT - 2:  # Leave room for user + assistant
+            state.messages = summarize_history(state.messages)
+
         # Format conversation for CLI
         prompt = format_conversation(full_system, state.messages, user_input)
 
@@ -935,10 +1201,6 @@ def run_repl(state: SpecificationState) -> None:
             # Add to history
             state.messages.append({"role": "user", "content": user_input})
             state.messages.append({"role": "assistant", "content": assistant_message})
-
-            # Context window management - summarize if too long
-            if len(state.messages) > SUMMARY_TRIGGER_COUNT:
-                state.messages = summarize_history(state.messages)
 
             # Print response
             print(f"\nArchitect: {assistant_message}")
@@ -1005,6 +1267,13 @@ def run_repl(state: SpecificationState) -> None:
                 print(f"\n{'=' * 40}")
                 print(f"ADVANCING TO: {state.phase.upper()}")
                 print(f"{'=' * 40}")
+
+                # Show refinement instructions when entering that phase
+                if state.phase == "refinement":
+                    print("\nReview your feature backlog before coding begins.")
+                    print("Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+                    print("")
+                    display_feature_table(state)
 
                 # Update working memory with gate completion
                 if MEMORY_AVAILABLE:
@@ -1134,7 +1403,7 @@ def print_status(state: SpecificationState) -> None:
         print(f"    - Missing: {GATE_4_PATH}")
 
     # Gate 5
-    g5_ok = g1_ok and g2_ok and g3_ok and g4_ok
+    g5_ok = g1_ok and g2_ok and g3_ok and g4_ok and has_features
     print(f"\nGate 5 (Synthesis):  {'OK' if g5_ok else 'INCOMPLETE'}")
     if not g5_ok:
         if not g1_ok:
@@ -1145,6 +1414,19 @@ def print_status(state: SpecificationState) -> None:
             print("    - Gate 3 incomplete")
         if not g4_ok:
             print("    - Gate 4 incomplete")
+        if not has_features:
+            print("    - features.json not generated")
+
+    # Gate 6 - Refinement (complete when phase is "complete")
+    g6_ok = state.phase == "complete"
+    print(f"\nGate 6 (Refinement): {'OK' if g6_ok else 'INCOMPLETE'}")
+    if state.phase == "refinement":
+        print("  Status: IN PROGRESS - reviewing backlog")
+        print("  Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+    elif g6_ok:
+        print("  Status: Backlog finalized")
+    else:
+        print("  Status: Waiting for Gate 5 (synthesis)")
 
     # Working memory status
     if memory_context:

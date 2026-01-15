@@ -82,7 +82,6 @@ log_success "Copied harness/reviewers/"
 
 # Copy coding harness (execution loop)
 cp "$HARNESS_ROOT/harness/coding/loop.py" harness/coding/
-cp "$HARNESS_ROOT/harness/coding/mcp_manager.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/verify.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/git_utils.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/repo_map.py" harness/coding/
@@ -178,6 +177,19 @@ npm install --save-dev @anthropic-ai/mcp-server-playwright @anthropic-ai/mcp-ser
     log_warn "Some MCP servers failed to install (they may not be published yet)"
 }
 
+# Register MCP servers with Claude CLI
+log_info "Registering MCP servers with Claude CLI..."
+if command -v claude &> /dev/null; then
+    claude mcp add playwright -- npx @anthropic-ai/mcp-server-playwright 2>/dev/null || true
+    claude mcp add filesystem -- npx @anthropic-ai/mcp-server-filesystem --root . 2>/dev/null || true
+    claude mcp add git -- npx @anthropic-ai/mcp-server-git 2>/dev/null || true
+    log_success "MCP servers registered"
+else
+    log_warn "Claude CLI not found - MCP servers not registered"
+    log_warn "Install with: npm install -g @anthropic-ai/claude-code"
+    log_warn "Then run: claude mcp add playwright -- npx @anthropic-ai/mcp-server-playwright"
+fi
+
 # Note: No Python dependencies needed - harness uses Claude CLI for all LLM calls
 log_success "Dependencies installed"
 
@@ -246,7 +258,6 @@ echo "    harness/reviewers/        - Pluggable review providers"
 echo ""
 echo "  Coding Harness:"
 echo "    harness/coding/loop.py         - Main orchestration loop"
-echo "    harness/coding/mcp_manager.py  - MCP server lifecycle"
 echo "    harness/coding/verify.py       - External test verification"
 echo "    harness/coding/git_utils.py    - Git checkpoint/rollback"
 echo "    harness/coding/repo_map.py     - Codebase structure mapping"

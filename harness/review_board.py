@@ -118,6 +118,28 @@ def get_max_cycles() -> int:
     return config.get("maxCycles", MAX_REVIEW_CYCLES)
 
 
+def _validate_provider_config() -> None:
+    """Warn if configured provider is not implemented."""
+    config = load_review_config()
+    provider = config.get("provider", "manual")
+    if provider != "manual":
+        print(f"WARNING: Review board provider '{provider}' is not implemented.")
+        print("Falling back to 'manual' (clipboard-based) review.")
+        print("Available providers: manual")
+
+
+# Validate provider config when review board is enabled
+_provider_validated = False
+
+
+def _ensure_provider_validated() -> None:
+    """Lazily validate provider config on first use."""
+    global _provider_validated
+    if not _provider_validated and is_enabled():
+        _validate_provider_config()
+        _provider_validated = True
+
+
 # ============================================================================
 # Review Triggers
 # ============================================================================
@@ -171,6 +193,9 @@ def should_review(stage: str, modified_files: Optional[list[str]] = None) -> boo
     """
     if not is_enabled():
         return False
+
+    # Validate provider config on first use
+    _ensure_provider_validated()
 
     config = load_review_config()
     stages_config = config.get("stages", {})
@@ -404,9 +429,12 @@ def request_review(
     cycle: int = 1
 ) -> ReviewResult:
     """
-    Request manual review via clipboard.
+    Request review using the configured provider.
 
-    The workflow:
+    Currently only 'manual' provider is implemented. Other providers
+    (gemini, claude, openai) are planned for future releases.
+
+    Manual workflow:
     1. Generate review packet with stage-specific prompt
     2. Copy to clipboard
     3. User pastes into Gemini/ChatGPT/other model

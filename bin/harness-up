@@ -61,7 +61,6 @@ CORE_FILES=(
     "harness/review_board.py"
     "harness/memory.py"
     "harness/coding/loop.py"
-    "harness/coding/mcp_manager.py"
     "harness/coding/verify.py"
     "harness/coding/git_utils.py"
     "harness/coding/repo_map.py"
@@ -204,7 +203,6 @@ else
     log_info "Syncing coding loop..."
     rsync -av \
         "$HARNESS_SOURCE/harness/coding/loop.py" \
-        "$HARNESS_SOURCE/harness/coding/mcp_manager.py" \
         "$HARNESS_SOURCE/harness/coding/verify.py" \
         "$HARNESS_SOURCE/harness/coding/git_utils.py" \
         "$HARNESS_SOURCE/harness/coding/repo_map.py" \

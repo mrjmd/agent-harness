@@ -15,18 +15,45 @@ This harness provides a template for autonomous coding agents that:
 
 ## Quick Start
 
+### Prerequisites
+
 ```bash
-# 1. Install Claude CLI
+# Python 3.10+ required
+python3 --version  # Must be 3.10+
+
+# Install Claude CLI
 npm install -g @anthropic-ai/claude-code
 
-# 2. Specify your product (required first)
-python harness/architect.py new "Your product idea"
-
-# 3. Execute the implementation
-python harness/coding/loop.py
+# Authenticate (required once)
+claude login
 ```
 
-> **Note:** Both phases use the `claude` CLI for LLM calls. No API key needed - the CLI handles authentication.
+### For New Projects (Greenfield)
+
+```bash
+mkdir my-new-app && cd my-new-app
+harness-init .
+python3 harness/architect.py new "Build a todo app with auth"
+python3 harness/coding/loop.py
+```
+
+### For Existing Projects (Brownfield)
+
+```bash
+# 1. Initialize harness
+harness-init /path/to/existing-project
+cd /path/to/existing-project
+
+# 2. Health check FIRST (before architect)
+python3 harness/doctor.py diagnose
+python3 harness/doctor.py stabilize  # Fix critical issues
+
+# 3. THEN run architect
+python3 harness/architect.py new "Add feature X to existing app"
+python3 harness/coding/loop.py
+```
+
+> **Note:** Both phases use the `claude` CLI for LLM calls. Authentication is handled via `claude login`.
 
 ## The Two Harnesses
 
@@ -34,7 +61,7 @@ python harness/coding/loop.py
 
 Adversarial interrogation that refuses to generate specs until ambiguity is eliminated.
 
-**The Five Gates:**
+**The Six Gates:**
 
 | Gate | Name | Purpose |
 |------|------|---------|
@@ -43,6 +70,15 @@ Adversarial interrogation that refuses to generate specs until ambiguity is elim
 | 3 | Technical Design | Lock down architecture -> `specs/tech_plan.md` |
 | 4 | Edge Cases | Force 3+ edge cases per feature (Rule of 3) |
 | 5 | Synthesis | Generate `specs/features.json` |
+| 6 | Refinement | Review, reorder, split backlog before coding |
+
+**Gate 6 Commands:**
+- `list` - Show all features with IDs and priorities
+- `split <id>` - Break a feature into smaller pieces
+- `reorder <id> <priority>` - Change feature priority
+- `drop <id>` - Remove a feature from backlog
+- `refine <id>` - Edit feature description/criteria
+- `finalize` - Lock backlog and proceed to coding
 
 **Key behaviors:**
 - Challenges vague terms ("login" -> "Magic link? Password? OAuth?")
@@ -146,10 +182,68 @@ The shared contract between Architect and Coding Loop:
 ```bash
 # Install Claude CLI (handles all LLM calls)
 npm install -g @anthropic-ai/claude-code
+claude login  # Authenticate once
 
 # Install Playwright (for testing)
 npm install --save-dev @playwright/test
 npx playwright install chromium
+```
+
+### Python Environment
+
+The harness requires Python 3.10+. For brownfield projects with existing virtual environments:
+
+```bash
+# Option 1: Use project's venv (if compatible)
+source .venv/bin/activate
+python --version  # Must be 3.10+
+
+# Option 2: Create dedicated harness venv
+python3 -m venv .harness-venv
+source .harness-venv/bin/activate
+```
+
+### MCP Server Configuration
+
+The harness uses MCP (Model Context Protocol) servers for tool access.
+These are registered during `harness-init`, but can be manually added:
+
+```bash
+claude mcp add playwright -- npx @anthropic-ai/mcp-server-playwright
+claude mcp add filesystem -- npx @anthropic-ai/mcp-server-filesystem --root .
+claude mcp add git -- npx @anthropic-ai/mcp-server-git
+```
+
+Required servers:
+- `playwright` - Browser automation for E2E testing
+- `filesystem` - File read/write operations
+- `git` - Version control operations
+
+Verify registered servers: `claude mcp list`
+
+### Review Board (Optional)
+
+Enable cross-model adversarial review for critical checkpoints:
+
+```bash
+export REVIEW_BOARD_ENABLED=1
+```
+
+When enabled, at critical checkpoints (after Gate 3, during sensitive file changes):
+1. A review packet is copied to your clipboard
+2. Paste into Gemini/ChatGPT for external review
+3. Copy the response and paste back
+4. Type `LGTM` to approve or paste feedback to revise
+
+Configure in `.claude/config.json`:
+```json
+{
+  "reviewBoard": {
+    "enabled": true,
+    "provider": "manual",
+    "criticalPaths": ["src/auth/**/*", "**/security*"]
+  }
+}
 ```
 
 ## Architecture
@@ -161,7 +255,6 @@ agent-harness/
 │   ├── archaeologist.py      # Pattern extraction (brownfield)
 │   ├── coding/               # Execution harness
 │   │   ├── loop.py           # Main orchestration
-│   │   ├── mcp_manager.py    # MCP server lifecycle
 │   │   ├── verify.py         # External test verification
 │   │   ├── git_utils.py      # Checkpoint/rollback
 │   │   ├── repo_map.py       # Codebase structure
@@ -211,6 +304,11 @@ User: "I want to build a todo app"
 ┌────────────────┐
 │   GATE 5       │  Validates all criteria
 │   Synthesis    │  → specs/features.json
+└───────┬────────┘
+        ↓
+┌────────────────┐
+│   GATE 6       │  list, split, reorder, drop, refine
+│   Refinement   │  → finalize when ready
 └────────────────┘
 ```
 
