@@ -623,17 +623,21 @@ def save_tech_plan(content: str) -> None:
 # =============================================================================
 
 def extract_gate_completion(response: str) -> Optional[str]:
-    """Check if response indicates gate completion."""
+    """Check if response indicates gate completion.
+
+    Only matches actual declarations, not future tense ("I will declare GATE X COMPLETE").
+    The pattern must appear at the start of a line or after punctuation.
+    """
     patterns = [
-        (r"GATE 1 COMPLETE", "solution"),
-        (r"GATE 2 COMPLETE", "technical"),
-        (r"GATE 3 COMPLETE", "edges"),
-        (r"GATE 4 COMPLETE", "synthesis"),
-        (r"GATE 5 COMPLETE", "complete"),
+        (r"(?:^|[.!?\n])\s*GATE 1 COMPLETE", "solution"),
+        (r"(?:^|[.!?\n])\s*GATE 2 COMPLETE", "technical"),
+        (r"(?:^|[.!?\n])\s*GATE 3 COMPLETE", "edges"),
+        (r"(?:^|[.!?\n])\s*GATE 4 COMPLETE", "synthesis"),
+        (r"(?:^|[.!?\n])\s*GATE 5 COMPLETE", "complete"),
     ]
 
     for pattern, next_phase in patterns:
-        if re.search(pattern, response, re.IGNORECASE):
+        if re.search(pattern, response, re.IGNORECASE | re.MULTILINE):
             return next_phase
 
     return None
@@ -937,44 +941,54 @@ def run_repl(state: SpecificationState) -> None:
             # Check for gate completion
             next_phase = extract_gate_completion(assistant_message)
             if next_phase:
-                # Review Board: Trigger adversarial review after Gate 3 (Technical Plan)
-                if state.phase == "technical" and next_phase == "edges":
-                    if REVIEW_BOARD_AVAILABLE and should_review("architect"):
-                        print(f"\n{'=' * 40}")
-                        print("REVIEW BOARD: Technical Plan Review")
-                        print(f"{'=' * 40}")
+                # Gate 5 validation: Don't complete unless features were actually generated
+                if next_phase == "complete":
+                    features = extract_features_json(assistant_message)
+                    if not features or len(features) == 0:
+                        print("\n[BLOCKED] Cannot complete: No features.json generated in response.")
+                        print("The architect must output a ```json block with the features array.")
+                        print("Staying in synthesis phase.\n")
+                        next_phase = None  # Block advancement
 
-                        # Get the tech plan content
-                        tech_plan_content = ""
-                        if TECH_PLAN_PATH.exists():
-                            tech_plan_content = TECH_PLAN_PATH.read_text()
+            # Review Board: Trigger adversarial review after Gate 3 (Technical Plan)
+            if next_phase and state.phase == "technical" and next_phase == "edges":
+                if REVIEW_BOARD_AVAILABLE and should_review("architect"):
+                    print(f"\n{'=' * 40}")
+                    print("REVIEW BOARD: Technical Plan Review")
+                    print(f"{'=' * 40}")
 
-                        # Build context for reviewer
-                        review_context = {
-                            "product": state.product_idea,
-                            "problem": state.problem_statement[:500] if state.problem_statement else "",
-                            "approach": state.chosen_approach.get("description", "")[:300] if state.chosen_approach else "",
-                        }
+                    # Get the tech plan content
+                    tech_plan_content = ""
+                    if TECH_PLAN_PATH.exists():
+                        tech_plan_content = TECH_PLAN_PATH.read_text()
 
-                        result = request_review(
-                            stage="architect",
-                            context=review_context,
-                            output=tech_plan_content
-                        )
+                    # Build context for reviewer
+                    review_context = {
+                        "product": state.product_idea,
+                        "problem": state.problem_statement[:500] if state.problem_statement else "",
+                        "approach": state.chosen_approach.get("description", "")[:300] if state.chosen_approach else "",
+                    }
 
-                        if not result.approved:
-                            # Feed reviewer feedback back into the conversation
-                            print("\n[REVIEW BOARD] Review rejected. Addressing feedback...")
-                            state.messages.append({
-                                "role": "system",
-                                "content": f"REVIEWER VETO:\n{result.feedback}\n\nAddress these concerns before proceeding to edge cases."
-                            })
-                            # Don't advance phase - stay in technical
-                            save_state(state)
-                            continue
-                        else:
-                            print("\n[REVIEW BOARD] Technical plan approved.")
+                    result = request_review(
+                        stage="architect",
+                        context=review_context,
+                        output=tech_plan_content
+                    )
 
+                    if not result.approved:
+                        # Feed reviewer feedback back into the conversation
+                        print("\n[REVIEW BOARD] Review rejected. Addressing feedback...")
+                        state.messages.append({
+                            "role": "system",
+                            "content": f"REVIEWER VETO:\n{result.feedback}\n\nAddress these concerns before proceeding to edge cases."
+                        })
+                        # Don't advance phase - stay in technical
+                        save_state(state)
+                        continue
+                    else:
+                        print("\n[REVIEW BOARD] Technical plan approved.")
+
+            if next_phase:
                 state.phase = next_phase
                 print(f"\n{'=' * 40}")
                 print(f"ADVANCING TO: {state.phase.upper()}")
