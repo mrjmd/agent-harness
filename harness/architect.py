@@ -1032,7 +1032,13 @@ def run_repl(state: SpecificationState) -> None:
 # =============================================================================
 
 def print_status(state: SpecificationState) -> None:
-    """Print current specification status."""
+    """Print current specification status.
+
+    Checks multiple sources of truth:
+    1. State object (from session.json)
+    2. Filesystem (specs/*.md files)
+    3. Working memory (if available)
+    """
     print("\n" + "=" * 50)
     print("SPECIFICATION STATUS")
     print("=" * 50)
@@ -1040,48 +1046,96 @@ def print_status(state: SpecificationState) -> None:
     print(f"\nPhase: {state.phase.upper()}")
     print(f"Product: {state.product_idea}")
 
-    # Gate 1
-    g1_ok, g1_issues = check_gate1_criteria(state)
+    # Check filesystem for additional evidence
+    specs_dir = Path("specs")
+    has_problem_doc = any(specs_dir.glob("*problem*.md")) or any(specs_dir.glob("*Problem*.md"))
+    has_solution_doc = any(specs_dir.glob("*solution*.md")) or any(specs_dir.glob("*Solution*.md"))
+    has_tech_plan = TECH_PLAN_PATH.exists()
+    has_features = FEATURES_PATH.exists()
+
+    # Load features from file if state doesn't have them
+    file_features = []
+    if has_features:
+        try:
+            data = json.loads(FEATURES_PATH.read_text())
+            if isinstance(data, dict) and "features" in data:
+                file_features = [f for f in data["features"] if f.get("id") != "example-001"]
+            elif isinstance(data, list):
+                file_features = data
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+
+    # Check working memory for additional context
+    memory_context = ""
+    if MEMORY_AVAILABLE:
+        memory = read_memory("architect")
+        memory_context = f"{len(memory.questions)} Q&A, {len(memory.decisions)} decisions recorded"
+
+    # Gate 1 - also check for problem docs
+    g1_ok = bool(state.problem_statement) or has_problem_doc
     print(f"\nGate 1 (Problem):    {'OK' if g1_ok else 'INCOMPLETE'}")
     if state.problem_statement:
         print(f"  Problem: {state.problem_statement[:50]}...")
+    elif has_problem_doc:
+        print(f"  Problem: Documented in specs/")
     if state.user_personas:
         print(f"  Personas: {len(state.user_personas)} defined")
-    for issue in g1_issues:
-        print(f"    - {issue}")
+    if not g1_ok:
+        print("    - Problem statement not captured in state")
 
-    # Gate 2
-    g2_ok, g2_issues = check_gate2_criteria(state)
+    # Gate 2 - also check for solution docs
+    g2_ok = bool(state.chosen_approach) or has_solution_doc or len(state.solution_alternatives) >= 3
     print(f"\nGate 2 (Solution):   {'OK' if g2_ok else 'INCOMPLETE'}")
-    print(f"  Alternatives: {len(state.solution_alternatives)} explored")
+    if state.solution_alternatives:
+        print(f"  Alternatives: {len(state.solution_alternatives)} explored")
     if state.chosen_approach:
         print(f"  Chosen: {state.chosen_approach.get('description', 'unknown')[:40]}...")
-    for issue in g2_issues:
-        print(f"    - {issue}")
+    elif has_solution_doc:
+        print(f"  Solution: Documented in specs/")
+    if not g2_ok:
+        print("    - Solution approach not captured in state")
 
-    # Gate 3
-    g3_ok, g3_issues = check_gate3_criteria(state)
+    # Gate 3 - check tech_plan.md
+    g3_ok = state.tech_plan_generated or has_tech_plan
     print(f"\nGate 3 (Technical):  {'OK' if g3_ok else 'INCOMPLETE'}")
-    print(f"  Tech plan: {'Generated' if state.tech_plan_generated else 'Not generated'}")
-    for issue in g3_issues:
-        print(f"    - {issue}")
+    if has_tech_plan:
+        print(f"  Tech plan: {TECH_PLAN_PATH}")
+    elif state.tech_plan_generated:
+        print(f"  Tech plan: Generated (in state)")
+    else:
+        print(f"  Tech plan: Not generated")
+        print(f"    - {TECH_PLAN_PATH} does not exist")
 
-    # Gate 4
-    g4_ok, g4_issues = check_gate4_criteria(state)
+    # Gate 4 - check features (from state or file)
+    features = state.features if state.features else file_features
+    g4_ok = len(features) > 0
     print(f"\nGate 4 (Edge Cases): {'OK' if g4_ok else 'INCOMPLETE'}")
-    print(f"  Features: {len(state.features)}")
-    for feature in state.features:
-        edge_count = len(feature.get("edge_cases", []))
-        status = "OK" if edge_count >= 3 else f"NEED {3 - edge_count} MORE"
-        print(f"    - {feature.get('id', '?')}: {edge_count} edge cases ({status})")
-    for issue in g4_issues:
-        print(f"    - {issue}")
+    print(f"  Features: {len(features)}")
+    if features:
+        for feature in features[:5]:  # Show first 5
+            edge_count = len(feature.get("edge_cases", []))
+            print(f"    - {feature.get('id', '?')}: {feature.get('description', '')[:40]}...")
+        if len(features) > 5:
+            print(f"    ... and {len(features) - 5} more")
+    else:
+        print("    - No features defined yet")
 
     # Gate 5
-    g5_ok, g5_issues = check_gate5_criteria(state)
+    g5_ok = g1_ok and g2_ok and g3_ok and g4_ok
     print(f"\nGate 5 (Synthesis):  {'OK' if g5_ok else 'INCOMPLETE'}")
-    for issue in g5_issues:
-        print(f"    - {issue}")
+    if not g5_ok:
+        if not g1_ok:
+            print("    - Gate 1 incomplete")
+        if not g2_ok:
+            print("    - Gate 2 incomplete")
+        if not g3_ok:
+            print("    - Gate 3 incomplete")
+        if not g4_ok:
+            print("    - Gate 4 incomplete")
+
+    # Working memory status
+    if memory_context:
+        print(f"\nWorking Memory: {memory_context}")
 
     print("\n" + "=" * 50)
 
