@@ -53,8 +53,14 @@ except ImportError:
 SPECS_DIR = Path("specs")
 SESSION_PATH = SPECS_DIR / "session.json"
 FEATURES_PATH = SPECS_DIR / "features.json"
-TECH_PLAN_PATH = SPECS_DIR / "tech_plan.md"
 HEALTH_REPORT_PATH = SPECS_DIR / "health_report.md"
+
+# Gate document paths (enforced naming convention)
+GATE_1_PATH = SPECS_DIR / "gate-1-problem-discovery.md"
+GATE_2_PATH = SPECS_DIR / "gate-2-solution-space.md"
+GATE_3_PATH = SPECS_DIR / "gate-3-tech-plan.md"
+GATE_4_PATH = SPECS_DIR / "gate-4-edge-cases.md"
+TECH_PLAN_PATH = GATE_3_PATH  # Alias for backwards compatibility
 
 # Gate definitions
 GATES = ["problem", "solution", "technical", "edges", "synthesis", "complete"]
@@ -348,6 +354,8 @@ EXIT CRITERIA (all must be met):
 ANTI-PATTERN: If user describes a solution, respond with:
 "That's HOW. Tell me WHY. What problem does this solve?"
 
+DOCUMENTATION: When criteria are met, save a summary to: specs/gate-1-problem-discovery.md
+
 When all criteria are met, say: "GATE 1 COMPLETE. Moving to Solution Space."
 """,
 
@@ -372,6 +380,8 @@ EXIT CRITERIA (all must be met):
 [ ] 3+ alternatives explored with trade-offs
 [ ] ONE approach explicitly chosen with reasoning
 [ ] Trade-offs documented and accepted
+
+DOCUMENTATION: When criteria are met, save a summary to: specs/gate-2-solution-space.md
 
 When all criteria are met, say: "GATE 2 COMPLETE. Moving to Technical Design."
 """,
@@ -405,7 +415,7 @@ EXIT CRITERIA (all must be met):
 [ ] Component/page structure outlined
 [ ] Key patterns decided (auth, state, validation)
 
-After collecting this information, generate specs/tech_plan.md with the full architecture.
+DOCUMENTATION: Save the complete technical architecture to: specs/gate-3-tech-plan.md
 
 When complete, say: "GATE 3 COMPLETE. Technical plan saved. Moving to Edge Cases."
 """,
@@ -433,6 +443,8 @@ EXIT CRITERIA (all must be met):
 [ ] Every feature has 3+ documented edge cases
 [ ] User specified EXACT behavior for each edge case
 [ ] Error messages are defined (actual strings)
+
+DOCUMENTATION: Save the edge cases summary to: specs/gate-4-edge-cases.md
 
 When all features have adequate edge cases, say: "GATE 4 COMPLETE. Moving to Synthesis."
 """,
@@ -1046,11 +1058,11 @@ def print_status(state: SpecificationState) -> None:
     print(f"\nPhase: {state.phase.upper()}")
     print(f"Product: {state.product_idea}")
 
-    # Check filesystem for additional evidence
-    specs_dir = Path("specs")
-    has_problem_doc = any(specs_dir.glob("*problem*.md")) or any(specs_dir.glob("*Problem*.md"))
-    has_solution_doc = any(specs_dir.glob("*solution*.md")) or any(specs_dir.glob("*Solution*.md"))
-    has_tech_plan = TECH_PLAN_PATH.exists()
+    # Check filesystem for gate documents
+    has_gate_1 = GATE_1_PATH.exists()
+    has_gate_2 = GATE_2_PATH.exists()
+    has_gate_3 = GATE_3_PATH.exists()
+    has_gate_4 = GATE_4_PATH.exists()
     has_features = FEATURES_PATH.exists()
 
     # Load features from file if state doesn't have them
@@ -1071,45 +1083,46 @@ def print_status(state: SpecificationState) -> None:
         memory = read_memory("architect")
         memory_context = f"{len(memory.questions)} Q&A, {len(memory.decisions)} decisions recorded"
 
-    # Gate 1 - also check for problem docs
-    g1_ok = bool(state.problem_statement) or has_problem_doc
+    # Gate 1 - check for problem discovery doc
+    g1_ok = bool(state.problem_statement) or has_gate_1
     print(f"\nGate 1 (Problem):    {'OK' if g1_ok else 'INCOMPLETE'}")
-    if state.problem_statement:
+    if has_gate_1:
+        print(f"  Doc: {GATE_1_PATH}")
+    elif state.problem_statement:
         print(f"  Problem: {state.problem_statement[:50]}...")
-    elif has_problem_doc:
-        print(f"  Problem: Documented in specs/")
     if state.user_personas:
         print(f"  Personas: {len(state.user_personas)} defined")
     if not g1_ok:
-        print("    - Problem statement not captured in state")
+        print(f"    - Missing: {GATE_1_PATH}")
 
-    # Gate 2 - also check for solution docs
-    g2_ok = bool(state.chosen_approach) or has_solution_doc or len(state.solution_alternatives) >= 3
+    # Gate 2 - check for solution space doc
+    g2_ok = bool(state.chosen_approach) or has_gate_2 or len(state.solution_alternatives) >= 3
     print(f"\nGate 2 (Solution):   {'OK' if g2_ok else 'INCOMPLETE'}")
-    if state.solution_alternatives:
+    if has_gate_2:
+        print(f"  Doc: {GATE_2_PATH}")
+    elif state.solution_alternatives:
         print(f"  Alternatives: {len(state.solution_alternatives)} explored")
     if state.chosen_approach:
         print(f"  Chosen: {state.chosen_approach.get('description', 'unknown')[:40]}...")
-    elif has_solution_doc:
-        print(f"  Solution: Documented in specs/")
     if not g2_ok:
-        print("    - Solution approach not captured in state")
+        print(f"    - Missing: {GATE_2_PATH}")
 
-    # Gate 3 - check tech_plan.md
-    g3_ok = state.tech_plan_generated or has_tech_plan
+    # Gate 3 - check for tech plan doc
+    g3_ok = state.tech_plan_generated or has_gate_3
     print(f"\nGate 3 (Technical):  {'OK' if g3_ok else 'INCOMPLETE'}")
-    if has_tech_plan:
-        print(f"  Tech plan: {TECH_PLAN_PATH}")
+    if has_gate_3:
+        print(f"  Doc: {GATE_3_PATH}")
     elif state.tech_plan_generated:
         print(f"  Tech plan: Generated (in state)")
     else:
-        print(f"  Tech plan: Not generated")
-        print(f"    - {TECH_PLAN_PATH} does not exist")
+        print(f"    - Missing: {GATE_3_PATH}")
 
-    # Gate 4 - check features (from state or file)
+    # Gate 4 - check edge cases doc and features
     features = state.features if state.features else file_features
-    g4_ok = len(features) > 0
+    g4_ok = has_gate_4 or len(features) > 0
     print(f"\nGate 4 (Edge Cases): {'OK' if g4_ok else 'INCOMPLETE'}")
+    if has_gate_4:
+        print(f"  Doc: {GATE_4_PATH}")
     print(f"  Features: {len(features)}")
     if features:
         for feature in features[:5]:  # Show first 5
@@ -1117,8 +1130,8 @@ def print_status(state: SpecificationState) -> None:
             print(f"    - {feature.get('id', '?')}: {feature.get('description', '')[:40]}...")
         if len(features) > 5:
             print(f"    ... and {len(features) - 5} more")
-    else:
-        print("    - No features defined yet")
+    elif not has_gate_4:
+        print(f"    - Missing: {GATE_4_PATH}")
 
     # Gate 5
     g5_ok = g1_ok and g2_ok and g3_ok and g4_ok
