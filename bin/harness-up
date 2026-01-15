@@ -17,9 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_SOURCE="$(dirname "$SCRIPT_DIR")"
 
 # Colors
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log_info() { echo -e "${BLUE}[SYNC]${NC} $1"; }
@@ -27,11 +29,9 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
 
 # Parse args
-DRY_RUN=""
+DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
-    DRY_RUN="--dry-run"
-    echo -e "${YELLOW}DRY RUN MODE - No files will be changed${NC}"
-    echo ""
+    DRY_RUN=true
 fi
 
 # Validate we're in a harness-enabled project
@@ -53,72 +53,204 @@ log_info "Source: $HARNESS_SOURCE"
 log_info "Target: $(pwd)"
 echo ""
 
-# Ensure harness directory exists
-mkdir -p harness/coding harness/reviewers harness/templates
+# Files to sync (relative paths from harness root)
+CORE_FILES=(
+    "harness/architect.py"
+    "harness/archaeologist.py"
+    "harness/doctor.py"
+    "harness/review_board.py"
+    "harness/memory.py"
+    "harness/coding/loop.py"
+    "harness/coding/mcp_manager.py"
+    "harness/coding/verify.py"
+    "harness/coding/git_utils.py"
+    "harness/coding/repo_map.py"
+    "harness/coding/reflection.py"
+    "harness/coding/review.py"
+    "harness/reviewers/__init__.py"
+    "harness/reviewers/base.py"
+    "harness/reviewers/openai_reviewer.py"
+)
 
-# 1. Sync core harness files (OVERWRITE)
-# These are the "engine" - always take latest
-log_info "Syncing core harness files..."
-rsync -av $DRY_RUN \
-    "$HARNESS_SOURCE/harness/architect.py" \
-    "$HARNESS_SOURCE/harness/archaeologist.py" \
-    "$HARNESS_SOURCE/harness/doctor.py" \
-    "$HARNESS_SOURCE/harness/review_board.py" \
-    "$HARNESS_SOURCE/harness/memory.py" \
-    ./harness/
+# Compare files and categorize
+compare_file() {
+    local rel_path="$1"
+    local src="$HARNESS_SOURCE/$rel_path"
+    local dst="./$rel_path"
 
-# 2. Sync coding loop files (OVERWRITE)
-log_info "Syncing coding loop..."
-rsync -av $DRY_RUN \
-    "$HARNESS_SOURCE/harness/coding/loop.py" \
-    "$HARNESS_SOURCE/harness/coding/mcp_manager.py" \
-    "$HARNESS_SOURCE/harness/coding/verify.py" \
-    "$HARNESS_SOURCE/harness/coding/git_utils.py" \
-    "$HARNESS_SOURCE/harness/coding/repo_map.py" \
-    "$HARNESS_SOURCE/harness/coding/reflection.py" \
-    "$HARNESS_SOURCE/harness/coding/review.py" \
-    ./harness/coding/
+    if [[ ! -f "$src" ]]; then
+        echo "MISSING_SRC"
+    elif [[ ! -f "$dst" ]]; then
+        echo "NEW"
+    elif diff -q "$src" "$dst" > /dev/null 2>&1; then
+        echo "UNCHANGED"
+    else
+        echo "CHANGED"
+    fi
+}
 
-# 3. Sync reviewers module (OVERWRITE)
-log_info "Syncing reviewers..."
-rsync -av $DRY_RUN --delete \
-    --exclude '__pycache__' \
-    "$HARNESS_SOURCE/harness/reviewers/" \
-    ./harness/reviewers/
+if $DRY_RUN; then
+    echo -e "${YELLOW}DRY RUN - Showing what would change${NC}"
+    echo ""
 
-# 4. Sync templates (ADD NEW ONLY - don't overwrite customized ones)
-log_info "Syncing templates (new files only)..."
-rsync -av $DRY_RUN --ignore-existing \
-    "$HARNESS_SOURCE/harness/templates/" \
-    ./harness/templates/
+    NEW_FILES=()
+    CHANGED_FILES=()
+    UNCHANGED_FILES=()
 
-# 5. Sync .claude/CLAUDE.md ONLY if it doesn't exist or is identical to source
-# (This is the "constitution" - projects may customize it)
-if [[ ! -f ".claude/CLAUDE.md" ]]; then
-    log_info "Creating .claude/CLAUDE.md..."
-    mkdir -p .claude
-    rsync -av $DRY_RUN "$HARNESS_SOURCE/.claude/CLAUDE.md" ./.claude/
-elif diff -q "$HARNESS_SOURCE/.claude/CLAUDE.md" ".claude/CLAUDE.md" > /dev/null 2>&1; then
-    log_info "Updating .claude/CLAUDE.md (unchanged from source)..."
-    rsync -av $DRY_RUN "$HARNESS_SOURCE/.claude/CLAUDE.md" ./.claude/
+    for file in "${CORE_FILES[@]}"; do
+        status=$(compare_file "$file")
+        case $status in
+            NEW) NEW_FILES+=("$file") ;;
+            CHANGED) CHANGED_FILES+=("$file") ;;
+            UNCHANGED) UNCHANGED_FILES+=("$file") ;;
+        esac
+    done
+
+    # Check for new template files
+    NEW_TEMPLATES=()
+    if [[ -d "$HARNESS_SOURCE/harness/templates" ]]; then
+        for src_template in "$HARNESS_SOURCE/harness/templates"/*; do
+            if [[ -f "$src_template" ]]; then
+                template_name=$(basename "$src_template")
+                if [[ ! -f "./harness/templates/$template_name" ]]; then
+                    NEW_TEMPLATES+=("harness/templates/$template_name")
+                fi
+            fi
+        done
+    fi
+
+    # Check CLAUDE.md status
+    CLAUDE_MD_STATUS="SKIP"
+    if [[ ! -f ".claude/CLAUDE.md" ]]; then
+        CLAUDE_MD_STATUS="NEW"
+    elif diff -q "$HARNESS_SOURCE/.claude/CLAUDE.md" ".claude/CLAUDE.md" > /dev/null 2>&1; then
+        CLAUDE_MD_STATUS="UNCHANGED"
+    else
+        CLAUDE_MD_STATUS="CUSTOMIZED"
+    fi
+
+    # Display results
+    if [[ ${#NEW_FILES[@]} -gt 0 ]] || [[ ${#NEW_TEMPLATES[@]} -gt 0 ]] || [[ "$CLAUDE_MD_STATUS" == "NEW" ]]; then
+        echo -e "${GREEN}NEW FILES (will be added):${NC}"
+        for file in "${NEW_FILES[@]}"; do
+            echo -e "  ${GREEN}+${NC} $file"
+        done
+        for file in "${NEW_TEMPLATES[@]}"; do
+            echo -e "  ${GREEN}+${NC} $file"
+        done
+        if [[ "$CLAUDE_MD_STATUS" == "NEW" ]]; then
+            echo -e "  ${GREEN}+${NC} .claude/CLAUDE.md"
+        fi
+        echo ""
+    fi
+
+    if [[ ${#CHANGED_FILES[@]} -gt 0 ]]; then
+        echo -e "${CYAN}CHANGED FILES (will be updated):${NC}"
+        for file in "${CHANGED_FILES[@]}"; do
+            echo -e "  ${CYAN}~${NC} $file"
+            # Show brief diff stats
+            src="$HARNESS_SOURCE/$file"
+            dst="./$file"
+            diff_stats=$(diff "$dst" "$src" | grep -c '^[<>]' || true)
+            echo -e "      ${BLUE}($diff_stats lines differ)${NC}"
+        done
+        echo ""
+    fi
+
+    if [[ ${#UNCHANGED_FILES[@]} -gt 0 ]]; then
+        echo -e "${BLUE}UNCHANGED (already up to date):${NC}"
+        for file in "${UNCHANGED_FILES[@]}"; do
+            echo -e "  ${BLUE}=${NC} $file"
+        done
+        echo ""
+    fi
+
+    # Show skipped items
+    echo -e "${YELLOW}PRESERVED (will not be touched):${NC}"
+    echo -e "  ${YELLOW}-${NC} specs/features.json"
+    echo -e "  ${YELLOW}-${NC} specs/learnings.json"
+    echo -e "  ${YELLOW}-${NC} specs/memory/*"
+    echo -e "  ${YELLOW}-${NC} .claude/config.json"
+    if [[ "$CLAUDE_MD_STATUS" == "CUSTOMIZED" ]]; then
+        echo -e "  ${YELLOW}-${NC} .claude/CLAUDE.md (has local customizations)"
+    fi
+    echo -e "  ${YELLOW}-${NC} Existing templates in harness/templates/"
+    echo ""
+
+    # Summary
+    echo "=========================================="
+    echo -e "Summary: ${GREEN}${#NEW_FILES[@]} new${NC}, ${CYAN}${#CHANGED_FILES[@]} changed${NC}, ${BLUE}${#UNCHANGED_FILES[@]} unchanged${NC}"
+    echo "=========================================="
+    echo ""
+    echo "Run 'harness-up' (without --dry-run) to apply changes."
+
 else
-    log_warn ".claude/CLAUDE.md has local customizations, skipping"
+    # Actually perform the sync
+
+    # Ensure directories exist
+    mkdir -p harness/coding harness/reviewers harness/templates
+
+    # Sync core harness files
+    log_info "Syncing core harness files..."
+    rsync -av \
+        "$HARNESS_SOURCE/harness/architect.py" \
+        "$HARNESS_SOURCE/harness/archaeologist.py" \
+        "$HARNESS_SOURCE/harness/doctor.py" \
+        "$HARNESS_SOURCE/harness/review_board.py" \
+        "$HARNESS_SOURCE/harness/memory.py" \
+        ./harness/
+
+    # Sync coding loop files
+    log_info "Syncing coding loop..."
+    rsync -av \
+        "$HARNESS_SOURCE/harness/coding/loop.py" \
+        "$HARNESS_SOURCE/harness/coding/mcp_manager.py" \
+        "$HARNESS_SOURCE/harness/coding/verify.py" \
+        "$HARNESS_SOURCE/harness/coding/git_utils.py" \
+        "$HARNESS_SOURCE/harness/coding/repo_map.py" \
+        "$HARNESS_SOURCE/harness/coding/reflection.py" \
+        "$HARNESS_SOURCE/harness/coding/review.py" \
+        ./harness/coding/
+
+    # Sync reviewers module
+    log_info "Syncing reviewers..."
+    rsync -av --delete \
+        --exclude '__pycache__' \
+        "$HARNESS_SOURCE/harness/reviewers/" \
+        ./harness/reviewers/
+
+    # Sync templates (new files only)
+    log_info "Syncing templates (new files only)..."
+    rsync -av --ignore-existing \
+        "$HARNESS_SOURCE/harness/templates/" \
+        ./harness/templates/
+
+    # Handle CLAUDE.md
+    if [[ ! -f ".claude/CLAUDE.md" ]]; then
+        log_info "Creating .claude/CLAUDE.md..."
+        mkdir -p .claude
+        rsync -av "$HARNESS_SOURCE/.claude/CLAUDE.md" ./.claude/
+    elif diff -q "$HARNESS_SOURCE/.claude/CLAUDE.md" ".claude/CLAUDE.md" > /dev/null 2>&1; then
+        log_info "Updating .claude/CLAUDE.md (unchanged from source)..."
+        rsync -av "$HARNESS_SOURCE/.claude/CLAUDE.md" ./.claude/
+    else
+        log_warn ".claude/CLAUDE.md has local customizations, skipping"
+    fi
+
+    # Ensure required directories exist
+    mkdir -p specs/memory specs/context tests/e2e
+
+    echo ""
+    echo "=========================================="
+    log_success "Harness updated to latest version!"
+    echo "=========================================="
+    echo ""
+
+    echo "Preserved (not touched):"
+    echo "  - specs/features.json"
+    echo "  - specs/learnings.json"
+    echo "  - specs/memory/*"
+    echo "  - .claude/config.json"
+    echo "  - Any customized templates"
+    echo ""
 fi
-
-# 6. Ensure required directories exist
-mkdir -p specs/memory specs/context tests/e2e
-
-echo ""
-echo "=========================================="
-log_success "Harness updated to latest version!"
-echo "=========================================="
-echo ""
-
-# Show what was preserved
-echo "Preserved (not touched):"
-echo "  - specs/features.json"
-echo "  - specs/learnings.json"
-echo "  - specs/memory/*"
-echo "  - .claude/config.json"
-echo "  - Any customized templates"
-echo ""
