@@ -19,6 +19,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Working Memory
+try:
+    from memory import update_understanding
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 
 # Output path
 PATTERNS_PATH = Path("specs/context/patterns.md")
@@ -295,6 +302,19 @@ def save_patterns(content: str) -> None:
 """
     PATTERNS_PATH.write_text(header + content)
     print(f"Saved patterns to {PATTERNS_PATH}")
+
+    # Update working memory with key patterns
+    if MEMORY_AVAILABLE:
+        update_understanding("archaeologist", "patterns_extracted", "true")
+        update_understanding("archaeologist", "patterns_path", str(PATTERNS_PATH))
+        # Extract and record key sections if they exist
+        if "## Naming Conventions" in content:
+            section_start = content.find("## Naming Conventions")
+            section_end = content.find("##", section_start + 5)
+            if section_end == -1:
+                section_end = len(content)
+            naming = content[section_start:section_end].strip()[:300]
+            update_understanding("archaeologist", "naming_conventions", naming)
 
 
 def has_python_files(directory: Path = Path(".")) -> bool:

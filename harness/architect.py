@@ -34,6 +34,20 @@ try:
 except ImportError:
     REVIEW_BOARD_AVAILABLE = False
 
+# Working Memory
+try:
+    from memory import (
+        read_memory,
+        record_answer,
+        record_decision,
+        update_understanding,
+        get_memory_context,
+        extract_qa_pairs,
+    )
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 
 # Paths
 SPECS_DIR = Path("specs")
@@ -187,6 +201,14 @@ def summarize_history(messages: list) -> list:
     split_point = len(messages) - MAX_HISTORY_MESSAGES
     old_messages = messages[:split_point]
     recent_messages = messages[split_point:]
+
+    # CRITICAL: Persist Q&A pairs to memory BEFORE they get summarized
+    if MEMORY_AVAILABLE:
+        qa_pairs = extract_qa_pairs(old_messages)
+        if qa_pairs:
+            print(f"(Persisting {len(qa_pairs)} Q&A pairs to working memory...)")
+            for question, answer in qa_pairs:
+                record_answer("architect", question, answer)
 
     # Build summary prompt
     summary_input = []
@@ -721,6 +743,12 @@ def build_context(state: SpecificationState) -> str:
     if HEALTH_REPORT_PATH.exists():
         context_parts.append(_summarize_health_for_architect())
 
+    # Include working memory context (Q&A, decisions, understanding)
+    if MEMORY_AVAILABLE:
+        memory_context = get_memory_context("architect")
+        if memory_context:
+            context_parts.append(memory_context)
+
     return "\n".join(context_parts)
 
 
@@ -814,6 +842,22 @@ EXECUTIVE SUMMARY (bullet points):"""
         return _extract_health_context()
 
 
+def _extract_questions_from_message(content: str) -> list[str]:
+    """Extract questions from an assistant message for Q&A tracking."""
+    questions = []
+    # Find sentences ending with ?
+    potential = re.findall(r'([^.!?\n]+\?)', content)
+    for q in potential:
+        q = q.strip()
+        # Skip short/rhetorical questions
+        if len(q) < 15:
+            continue
+        if any(meta in q.lower() for meta in ["does that make sense", "shall i", "should i", "ready to"]):
+            continue
+        questions.append(q)
+    return questions
+
+
 def run_repl(state: SpecificationState) -> None:
     """Run the interactive REPL loop using Claude CLI."""
 
@@ -822,6 +866,9 @@ def run_repl(state: SpecificationState) -> None:
     print("=" * 60)
     print(f"\nCurrent phase: {state.phase.upper()}")
     print("Type 'quit' to save and exit, 'status' to see progress.\n")
+
+    # Track pending questions from the last assistant message
+    pending_questions: list[str] = []
 
     while state.phase != "complete":
         # Get user input
@@ -844,6 +891,13 @@ def run_repl(state: SpecificationState) -> None:
         if user_input.lower() == "status":
             print_status(state)
             continue
+
+        # Record Q&A from previous exchange if we had pending questions
+        if MEMORY_AVAILABLE and pending_questions:
+            # Take the most significant question (last one)
+            main_question = pending_questions[-1]
+            record_answer("architect", main_question, user_input[:500])
+            pending_questions = []
 
         # Build system prompt
         system = SYSTEM_PROMPT.format(phase=state.phase.upper())
@@ -872,6 +926,10 @@ def run_repl(state: SpecificationState) -> None:
 
             # Print response
             print(f"\nArchitect: {assistant_message}")
+
+            # Extract questions for Q&A tracking
+            if MEMORY_AVAILABLE:
+                pending_questions = _extract_questions_from_message(assistant_message)
 
             # Extract state updates
             extract_state_updates(assistant_message, state)
@@ -921,6 +979,18 @@ def run_repl(state: SpecificationState) -> None:
                 print(f"\n{'=' * 40}")
                 print(f"ADVANCING TO: {state.phase.upper()}")
                 print(f"{'=' * 40}")
+
+                # Update working memory with gate completion
+                if MEMORY_AVAILABLE:
+                    update_understanding("architect", "current_gate", state.phase)
+                    record_decision(
+                        "architect",
+                        f"Gate completed: {next_phase}",
+                        context=f"Product: {state.product_idea[:100]}",
+                        options=["proceed", "stay"],
+                        chosen="proceed",
+                        rationale="Exit criteria met for previous gate"
+                    )
 
                 # Save features if complete
                 if state.phase == "complete":

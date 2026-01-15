@@ -58,7 +58,7 @@ fi
 log_info "Copying harness files..."
 
 # Create directories
-mkdir -p .claude harness/coding harness/templates harness/reviewers specs tests/e2e
+mkdir -p .claude harness/coding harness/templates harness/reviewers specs specs/memory specs/context tests/e2e
 
 # Copy .claude directory
 cp -r "$HARNESS_ROOT/.claude/"* .claude/ 2>/dev/null || true
@@ -69,10 +69,12 @@ cp "$HARNESS_ROOT/harness/architect.py" harness/
 cp "$HARNESS_ROOT/harness/archaeologist.py" harness/
 cp "$HARNESS_ROOT/harness/doctor.py" harness/
 cp "$HARNESS_ROOT/harness/review_board.py" harness/
+cp "$HARNESS_ROOT/harness/memory.py" harness/
 log_success "Copied harness/architect.py"
 log_success "Copied harness/archaeologist.py"
 log_success "Copied harness/doctor.py"
 log_success "Copied harness/review_board.py"
+log_success "Copied harness/memory.py"
 
 # Copy reviewers module (Bicameral Mind)
 cp -r "$HARNESS_ROOT/harness/reviewers/"* harness/reviewers/ 2>/dev/null || true
@@ -236,6 +238,7 @@ echo ""
 echo "  Specification Harness:"
 echo "    harness/architect.py      - Socratic specification REPL"
 echo "    harness/archaeologist.py  - Pattern extraction for brownfield"
+echo "    harness/memory.py         - Working memory persistence"
 echo ""
 echo "  Bicameral Review Board:"
 echo "    harness/review_board.py   - Cross-model adversarial review"
@@ -261,6 +264,7 @@ echo "Key features:"
 echo "  - Brownfield Doctor: Health audit before building on existing code"
 echo "  - Five Gates: Adversarial specification before any code"
 echo "  - Bicameral Review: Cross-model adversarial review at critical stages"
+echo "  - Working Memory: Q&A persistence survives context summarization"
 echo "  - External verification: Harness runs tests, not the agent"
 echo "  - Git checkpoints: Commit on green, rollback on red"
 echo "  - Regression fence: All tests must pass before feature completes"

@@ -33,6 +33,13 @@ import os
 import subprocess
 import sys
 
+# Working Memory
+try:
+    from memory import record_decision, update_understanding
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 # ============================================================================
 # Data Structures
 # ============================================================================
@@ -459,6 +466,17 @@ def request_review(
     # Check for explicit rejection
     if any(x in response_upper for x in ["CHANGES_REQUESTED", "REVISE", "REJECT", "FAIL"]):
         approved = False
+
+    # Record review decision in working memory
+    if MEMORY_AVAILABLE:
+        record_decision(
+            "review_board",
+            f"Review: {stage} cycle {cycle}",
+            context=f"Stage: {stage}, Output length: {len(output)} chars",
+            options=["approve", "reject"],
+            chosen="approved" if approved else "rejected",
+            rationale=response[:200] if response else "No feedback provided"
+        )
 
     return ReviewResult(
         approved=approved,

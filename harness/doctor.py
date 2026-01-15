@@ -28,6 +28,17 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+# Working Memory
+try:
+    from memory import (
+        update_understanding,
+        record_decision,
+        check_before_asking,
+    )
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 
 # =============================================================================
 # Configuration
@@ -1385,6 +1396,17 @@ def cmd_diagnose() -> int:
     print("")
     print(f"{_status_emoji(report.status)} Overall Status: {report.status.value.upper()}")
     print(f"Report saved to: {HEALTH_REPORT_PATH}")
+
+    # Update working memory with diagnosis findings
+    if MEMORY_AVAILABLE:
+        update_understanding("doctor", "project_type", project_type.value)
+        update_understanding("doctor", "health_status", report.status.value)
+        update_understanding("doctor", "lint_errors", str(sum(r.error_count for r in lint_results)))
+        update_understanding("doctor", "type_errors", str(type_errors))
+        if test_result:
+            update_understanding("doctor", "test_pass_rate", f"{test_result.pass_rate:.0%}")
+        update_understanding("doctor", "external_services", ", ".join(s.name for s in external_services) if external_services else "none")
+        update_understanding("doctor", "route_count", str(len(routes)))
 
     if report.status == HealthStatus.CRITICAL:
         print("")

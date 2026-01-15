@@ -51,6 +51,14 @@ try:
 except ImportError:
     REVIEW_BOARD_AVAILABLE = False
 
+# Working Memory
+try:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from memory import update_understanding, record_answer, get_memory_context
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 
 # Configuration
 FEATURES_PATH = Path("specs/features.json")
@@ -324,8 +332,20 @@ def run_feature_loop(session: FeatureSession) -> bool:
     print(f"Description: {feature.get('description', '')}")
     print(f"{'='*60}")
 
+    # Update working memory with current feature
+    if MEMORY_AVAILABLE:
+        update_understanding("coding_loop", "current_feature", feature_id)
+        update_understanding("coding_loop", "feature_description", feature.get("description", "")[:200])
+        update_understanding("coding_loop", "feature_status", "in_progress")
+
     # Build initial context with repo map
     initial_context = build_feature_context(feature)
+
+    # Include memory context if available
+    if MEMORY_AVAILABLE:
+        memory_ctx = get_memory_context("coding_loop")
+        if memory_ctx:
+            initial_context += f"\n\n{memory_ctx}"
 
     iteration = 0
     current_feedback = ""
@@ -459,6 +479,12 @@ Make the necessary changes and ensure they pass verification again."""
                         print("✓ All tests pass! Committing...")
                         commit_feature(feature_id, feature.get("description", ""))
                         session.iterations.append(record)
+
+                        # Update working memory with success
+                        if MEMORY_AVAILABLE:
+                            update_understanding("coding_loop", "feature_status", "passing")
+                            update_understanding("coding_loop", f"feature_{feature_id}_iterations", str(iteration))
+
                         return True
                     else:
                         # Regression detected - feed back to agent
