@@ -16,8 +16,10 @@ is external - the harness runs tests to catch hallucinations.
 """
 
 import json
+import select
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -111,27 +113,87 @@ class FeatureSession:
     checkpoint: str = ""
 
 
-def call_claude_cli(prompt_text: str, timeout: int = 600) -> str:
+def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
     """
-    Call claude CLI with formatted prompt.
+    Call claude CLI with streaming output for real-time feedback.
 
     The CLI will execute with its built-in tools (file editing, etc.)
+    Streams output in real-time so user can see progress.
     """
     try:
-        result = subprocess.run(
-            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout
+        process = subprocess.Popen(
+            ["claude", "--print", "--output-format", "stream-json",
+             "--include-partial-messages", "--dangerously-skip-permissions"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
         )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Claude CLI error: {e.stderr}")
-        raise
-    except subprocess.TimeoutExpired:
-        print(f"Claude CLI timed out after {timeout} seconds")
-        raise
+
+        # Send prompt via stdin
+        process.stdin.write(prompt_text)
+        process.stdin.close()
+
+        full_response = []
+        last_activity = time.time()
+
+        while True:
+            # Check for timeout
+            if time.time() - last_activity > timeout:
+                process.kill()
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+
+            # Read available output
+            ready, _, _ = select.select([process.stdout], [], [], 1.0)
+            if ready:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                last_activity = time.time()
+
+                # Parse streaming JSON and show real-time output
+                try:
+                    data = json.loads(line)
+                    if data.get("type") == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            full_response.append(text)
+                            # Print actual text as it streams
+                            print(text, end="", flush=True)
+                    elif data.get("type") == "message_stop":
+                        break
+                except json.JSONDecodeError:
+                    pass
+
+            # Check if process ended
+            if process.poll() is not None:
+                break
+
+        print()  # Newline after streaming output
+
+        # Get any remaining output
+        remaining = process.stdout.read()
+        if remaining:
+            try:
+                for line in remaining.strip().split("\n"):
+                    if line:
+                        data = json.loads(line)
+                        if data.get("type") == "content_block_delta":
+                            delta = data.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                full_response.append(delta.get("text", ""))
+            except json.JSONDecodeError:
+                pass
+
+        process.wait()
+
+        if process.returncode != 0:
+            stderr = process.stderr.read()
+            raise subprocess.CalledProcessError(process.returncode, "claude", stderr=stderr)
+
+        return "".join(full_response)
+
     except FileNotFoundError:
         print("ERROR: 'claude' CLI not found.")
         print("Install it: npm install -g @anthropic-ai/claude-code")
@@ -178,12 +240,21 @@ def format_conversation(context: str, history: list, current_feedback: str = "")
     # Instructions
     parts.append(XML_DELIMITERS["instructions_start"])
     parts.append("""
+AUTONOMOUS MODE - Do NOT ask for permission or confirmation. Execute immediately.
+
 Work on the feature described above. Follow TDD:
 1. Write a failing test first (in tests/e2e/)
 2. Implement the minimum code to make it pass
 3. When complete, say "IMPLEMENTATION COMPLETE" clearly
 
-The harness will verify your work externally. If tests fail, you'll receive feedback.
+CRITICAL RULES:
+- Do NOT ask "Would you like me to continue?" or similar questions
+- Do NOT wait for user confirmation
+- Do NOT output conversational pleasantries
+- Just DO the work and report completion
+- The harness will verify your work externally and provide feedback if tests fail
+
+This is a non-interactive autonomous loop. Execute the task fully, then state IMPLEMENTATION COMPLETE.
 """)
     parts.append(XML_DELIMITERS["instructions_end"])
 
@@ -363,8 +434,8 @@ def run_feature_loop(session: FeatureSession) -> bool:
             )
 
             # Call Claude CLI
-            print("Calling Claude CLI...")
-            response_text = call_claude_cli(prompt, timeout=600)
+            print("Calling Claude CLI (streaming, 30 min timeout)...\n")
+            response_text = call_claude_cli(prompt, timeout=1800)
 
             print(f"\nResponse preview: {response_text[:500]}...")
 
