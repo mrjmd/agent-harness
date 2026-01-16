@@ -351,6 +351,9 @@ CRITICAL: Review the backlog IN THE CONTEXT of these documents.
 - If the spec says "single-user app" or "v1 scope", do NOT raise enterprise scaling concerns
 - If the spec says "SQLite", do NOT suggest PostgreSQL clustering
 - Your feedback must be appropriate for the STATED scope and constraints
+- Do NOT suggest features that appear in the DEFERRED SCOPE section
+- These items were explicitly discussed and pushed to future versions
+- If you believe a deferred item should be reconsidered, flag it separately under "Deferred Scope Review"
 
 SPECIFICATION CONTEXT:
 {output}
@@ -413,6 +416,12 @@ For each section below, identify specific gaps and issues:
 - Are there criteria that are vague ("user-friendly", "fast", "intuitive")?
 - Do criteria specify what happens on failure, not just success?
 
+### 9. DEFERRED SCOPE REVIEW
+- Are any deferred items actually critical for v1 to function?
+- Are there features in the backlog that should be deferred instead?
+- Is the deferred scope document complete (captures all discussed deferrals)?
+- Were any items deferred too aggressively (core functionality pushed to v2)?
+
 ---
 
 ## OUTPUT FORMAT
@@ -431,7 +440,7 @@ ISSUE [N]: [Gate X → Features Gap] or [Category]
 
 After your analysis, provide:
 
-**COVERAGE SCORE**: X/8 sections have no critical issues
+**COVERAGE SCORE**: X/9 sections have no critical issues
 
 **VERDICT**:
 - APPROVED: Backlog is ready for implementation

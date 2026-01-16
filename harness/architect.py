@@ -61,6 +61,7 @@ GATE_1_PATH = SPECS_DIR / "gate-1-problem-discovery.md"
 GATE_2_PATH = SPECS_DIR / "gate-2-solution-space.md"
 GATE_3_PATH = SPECS_DIR / "gate-3-tech-plan.md"
 GATE_4_PATH = SPECS_DIR / "gate-4-edge-cases.md"
+DEFERRED_PATH = SPECS_DIR / "deferred-scope.md"
 TECH_PLAN_PATH = GATE_3_PATH  # Alias for backwards compatibility
 
 # Gate definitions
@@ -391,6 +392,12 @@ ASSUMPTION BUSTING - Challenge vague terms:
 | "notification" | Email? Push? In-app? SMS? |
 | "user" | Admin? Member? Guest? Anonymous? |
 
+CAPTURING DEFERRALS:
+When you or the user decide something is "out of scope for v1" or "future work":
+- Mark it clearly with: DEFERRED: [item] - [reason]
+- This creates institutional memory for future versions
+- Include: what's deferred, which gate, why, and when to revisit
+
 EXIT CRITERIA (all must be met):
 [ ] 3+ alternatives explored with trade-offs
 [ ] ONE approach explicitly chosen with reasoning
@@ -468,6 +475,12 @@ When all features have adequate edge cases, say: "GATE 4 COMPLETE. Moving to Syn
 
 Your objective: Convert interrogation into machine-readable specs.
 
+SCOPE BOUNDARIES:
+Before generating features, review specs/deferred-scope.md (if it exists).
+- Do NOT include deferred items in the feature backlog
+- If the user requests something already deferred, confirm they want to un-defer it
+- Deferred items are explicitly out of v1 scope
+
 GRANULARITY ENFORCEMENT:
 - Task takes >1 day to implement? MUST decompose into smaller features
 - Description contains "and then..."? SPLIT into separate features
@@ -520,6 +533,13 @@ WHEN THE USER REQUESTS A CHANGE:
 - Acknowledge the change conversationally ("Good call, I've moved X before Y...")
 - Output the FULL updated features array in a ```json``` code block
 - The harness will silently update features.json in the background
+
+DEFERRING FEATURES:
+If during refinement you and the user agree to defer a feature:
+- Remove it from features.json
+- Mark it with: DEFERRED: [feature name] - [reason]
+- The harness will add it to specs/deferred-scope.md automatically
+- Deferred items won't clutter v1 but are preserved for future versions
 
 EXAMPLE EXCHANGE:
 User: "Move the admin panel after user profile"
@@ -698,6 +718,34 @@ def save_tech_plan(content: str) -> None:
     print(f"\nSaved technical plan to {TECH_PLAN_PATH}")
 
 
+def save_deferred_item(item: str, gate: str, reason: str) -> None:
+    """Append a deferred item to deferred-scope.md."""
+    SPECS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Create file with header if it doesn't exist
+    if not DEFERRED_PATH.exists():
+        DEFERRED_PATH.write_text("""# Deferred Scope
+
+Items explicitly deferred to post-v1 or future versions.
+
+## Deferred Features
+
+""")
+
+    # Append new item
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    entry = f"""### {item}
+- **Deferred in**: {gate}
+- **Reason**: {reason}
+- **Date**: {timestamp}
+
+"""
+    with open(DEFERRED_PATH, "a") as f:
+        f.write(entry)
+
+    print(f"  [Deferred: {item}]")
+
+
 def detect_stability(assistant_message: str, state: "SpecificationState") -> bool:
     """
     Detect if Claude's response suggests the backlog is stable.
@@ -831,6 +879,7 @@ def run_crucible(state: SpecificationState, cycle: int = 1) -> str:
     gate_2_content = read_gate_doc(GATE_2_PATH)  # Solution Space
     gate_3_content = read_gate_doc(GATE_3_PATH)  # Tech Plan
     gate_4_content = read_gate_doc(GATE_4_PATH)  # Edge Cases
+    deferred_content = read_gate_doc(DEFERRED_PATH)  # Deferred Scope
 
     features_json = json.dumps(synthesize_features(state), indent=2)
 
@@ -846,6 +895,9 @@ def run_crucible(state: SpecificationState, cycle: int = 1) -> str:
 
 ## GATE 4: Edge Cases
 {gate_4_content if gate_4_content else "(not yet documented)"}
+
+## DEFERRED SCOPE (Explicitly Out of v1)
+{deferred_content if deferred_content else "(nothing deferred)"}
 
 ## FEATURE BACKLOG
 {features_json}
@@ -1146,6 +1198,19 @@ def extract_state_updates(response: str, state: SpecificationState) -> None:
     features = extract_features_json(response)
     if features:
         state.features = features
+
+    # Extract deferred items
+    # Pattern: "DEFERRED: [item] - [reason]" or "OUT OF SCOPE: [item]"
+    deferred_matches = re.findall(
+        r"(?:DEFERRED|OUT OF SCOPE|FUTURE|V2):\s*([^-\n]+)(?:\s*-\s*(.+))?",
+        response,
+        re.IGNORECASE
+    )
+    for match in deferred_matches:
+        item = match[0].strip() if match[0] else ""
+        reason = match[1].strip() if len(match) > 1 and match[1] else "Explicitly deferred"
+        if item:
+            save_deferred_item(item, state.phase, reason)
 
 
 # =============================================================================
@@ -1783,6 +1848,16 @@ def print_status(state: SpecificationState) -> None:
         print("  Status: Backlog finalized")
     else:
         print("  Status: Waiting for Gate 5 (synthesis)")
+
+    # Deferred scope status
+    has_deferred = DEFERRED_PATH.exists()
+    if has_deferred:
+        content = DEFERRED_PATH.read_text()
+        item_count = content.count("### ")
+        print(f"\nDeferred Scope: {item_count} items documented")
+        print(f"  Doc: {DEFERRED_PATH}")
+    else:
+        print(f"\nDeferred Scope: None (no items deferred)")
 
     # Working memory status
     if memory_context:
