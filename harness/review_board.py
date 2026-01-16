@@ -341,27 +341,38 @@ Output the annotated patterns in the same format, adding your classification.
 
 BACKLOG_PROMPT = """You are a Principal Product Manager reviewing a Feature Backlog.
 
-FEATURE BACKLOG:
+You have been given the FULL specification context from all planning gates:
+- Gate 1: Problem Discovery (target users, constraints, scope)
+- Gate 2: Solution Space (chosen approach, rejected alternatives)
+- Gate 3: Technical Plan (architecture, tech stack decisions)
+- Gate 4: Edge Cases (identified edge cases and handling)
+
+CRITICAL: Review the backlog IN THE CONTEXT of these documents.
+- If the spec says "single-user app" or "v1 scope", do NOT raise enterprise scaling concerns
+- If the spec says "SQLite", do NOT suggest PostgreSQL clustering or sharding
+- If the spec explicitly defers something to "post-v1", do NOT flag it as missing
+- Your feedback must be appropriate for the STATED scope and constraints
+
+SPECIFICATION CONTEXT:
 {output}
 
-CONTEXT:
+ADDITIONAL CONTEXT:
 {context}
 
-Compare this backlog against the Project Goals and Technical Plan.
-
-FIND:
-1. **Missing Flows**: Did we forget logout? Error states? Loading indicators? Password reset?
+FIND issues that are RELEVANT to the stated scope:
+1. **Missing Flows**: Did we forget logout? Error states? Loading indicators?
 2. **Dependency Gaps**: Does Feature B require Feature A but they're mis-ordered?
-3. **Scope Creep**: Is any feature too big to implement in one iteration?
-4. **Vague Criteria**: Are acceptance criteria actually testable and falsifiable?
-5. **Edge Case Coverage**: Does each feature have at least 3 edge cases defined?
+3. **Scope Creep**: Is any feature too big for the stated v1 scope?
+4. **Vague Criteria**: Are acceptance criteria testable and falsifiable?
+5. **Edge Case Coverage**: Are the Gate 4 edge cases reflected in features?
+6. **Constraint Violations**: Does any feature contradict the stated technical decisions?
 
 For each issue found, specify:
 - Which feature ID is affected (or "NEW" if missing)
 - What the problem is
 - Your recommended fix
 
-Be thorough. Don't be nice. Your job is to catch problems BEFORE implementation.
+Be thorough, but stay within the stated scope. Do NOT suggest over-engineering.
 
 Format:
 ISSUE 1: [Feature ID or NEW]
@@ -369,7 +380,7 @@ ISSUE 1: [Feature ID or NEW]
 - Recommendation: ...
 
 After listing issues, provide a verdict:
-- APPROVED: Backlog is ready for implementation
+- APPROVED: Backlog is ready for implementation within stated scope
 - REVISE: Issues must be addressed first
 """
 

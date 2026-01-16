@@ -43,6 +43,7 @@ class GeminiReviewer:
         """
         self.model_name = model
         self._client = None
+        self._chat_session = None  # Persistent chat for multi-cycle reviews
 
     @property
     def name(self) -> str:
@@ -104,8 +105,33 @@ class GeminiReviewer:
             # Build prompt using stage-specific template
             prompt = self._build_prompt(stage, context, output)
 
-            # Call Gemini API
-            response = client.generate_content(prompt)
+            # Use chat sessions for backlog reviews to maintain context
+            if stage == "backlog":
+                if cycle == 1 or self._chat_session is None:
+                    # First review or session lost - start fresh with full context
+                    self._chat_session = client.start_chat(history=[])
+                    response = self._chat_session.send_message(prompt)
+                else:
+                    # Subsequent review - chat remembers gate context
+                    # Just send the updated features
+                    update_prompt = f"""Here is the UPDATED feature backlog after addressing your previous feedback.
+
+Please review again, focusing on:
+1. Whether previous concerns were addressed
+2. Any new issues introduced by the changes
+3. Any remaining gaps
+
+Note: The gate documents (Problem Discovery, Solution Space, Technical Plan, Edge Cases) remain the same as before.
+
+UPDATED FEATURE BACKLOG:
+{output}
+
+Provide your verdict: APPROVED (if ready for implementation) or REVISE (with specific issues)."""
+                    response = self._chat_session.send_message(update_prompt)
+            else:
+                # Non-backlog stages: stateless single call
+                response = client.generate_content(prompt)
+
             response_text = response.text
 
             # Parse response for approval/rejection

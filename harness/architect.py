@@ -816,28 +816,53 @@ def run_crucible(state: SpecificationState, cycle: int = 1) -> str:
         tag = f"v{cycle}_refined"
     save_features(state, tag=tag)
 
-    # Build review context
-    context = {
-        "product": state.product_idea[:200] if state.product_idea else "",
-        "problem": state.problem_statement[:300] if state.problem_statement else "",
-        "approach": json.dumps(state.chosen_approach)[:300] if state.chosen_approach else "",
-    }
-
-    # Include tech plan if available
-    tech_plan = ""
-    if GATE_3_PATH.exists():
+    # Helper to read gate documents
+    def read_gate_doc(path: Path) -> str:
+        """Read gate document in full."""
+        if not path.exists():
+            return ""
         try:
-            tech_plan = GATE_3_PATH.read_text()[:2000]
+            return path.read_text()
         except IOError:
-            pass
+            return ""
+
+    # Read ALL gate documents for full context
+    gate_1_content = read_gate_doc(GATE_1_PATH)  # Problem Discovery
+    gate_2_content = read_gate_doc(GATE_2_PATH)  # Solution Space
+    gate_3_content = read_gate_doc(GATE_3_PATH)  # Tech Plan
+    gate_4_content = read_gate_doc(GATE_4_PATH)  # Edge Cases
 
     features_json = json.dumps(synthesize_features(state), indent=2)
+
+    # Build full context document with all gates
+    full_context = f"""## GATE 1: Problem Discovery
+{gate_1_content if gate_1_content else "(not yet documented)"}
+
+## GATE 2: Solution Space
+{gate_2_content if gate_2_content else "(not yet documented)"}
+
+## GATE 3: Technical Plan
+{gate_3_content if gate_3_content else "(not yet documented)"}
+
+## GATE 4: Edge Cases
+{gate_4_content if gate_4_content else "(not yet documented)"}
+
+## FEATURE BACKLOG
+{features_json}
+"""
+
+    # Context dict for prompt template
+    context = {
+        "gates": "Full gate documents included in output",
+        "cycle": cycle,
+    }
 
     # Request review via Review Board
     result = request_review(
         stage="backlog",
         context=context,
-        output=f"TECHNICAL PLAN:\n{tech_plan}\n\nFEATURE BACKLOG:\n{features_json}"
+        output=full_context,
+        cycle=cycle
     )
 
     print("\n" + "=" * 60)
