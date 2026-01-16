@@ -698,12 +698,105 @@ def save_tech_plan(content: str) -> None:
     print(f"\nSaved technical plan to {TECH_PLAN_PATH}")
 
 
-def run_crucible(state: SpecificationState) -> str:
+def detect_stability(assistant_message: str, state: "SpecificationState") -> bool:
+    """
+    Detect if Claude's response suggests the backlog is stable.
+
+    Stability indicators:
+    - JSON output present (Claude updated/confirmed the backlog)
+    - No explicit questions asked
+    - Phrases suggesting completeness
+
+    Args:
+        assistant_message: Claude's latest response
+        state: Current specification state
+
+    Returns:
+        True if backlog appears stable and ready for review/finalization
+    """
+    # Must have JSON output (Claude is showing the backlog state)
+    has_json = "```json" in assistant_message or '"features"' in assistant_message
+
+    if not has_json:
+        return False
+
+    message_lower = assistant_message.lower()
+
+    # Check for stability phrases
+    stability_phrases = [
+        "looks complete",
+        "ready for review",
+        "ready to finalize",
+        "backlog is complete",
+        "anything else",
+        "any other changes",
+        "does this look good",
+        "shall we finalize",
+        "ready to proceed",
+        "all set",
+        "good to go",
+    ]
+    has_stability_phrase = any(phrase in message_lower for phrase in stability_phrases)
+
+    # Check for active questioning (instability)
+    active_question_phrases = [
+        "which approach",
+        "should we",
+        "do you want",
+        "what about",
+        "how should",
+        "i need to know",
+        "please clarify",
+        "can you specify",
+    ]
+    has_active_questions = any(phrase in message_lower for phrase in active_question_phrases)
+
+    # Stable if: has JSON + (stability phrase OR no active questions)
+    return has_json and (has_stability_phrase or not has_active_questions)
+
+
+def prompt_stability_checkpoint(state: "SpecificationState", review_cycle: int) -> str:
+    """
+    Prompt user at stability checkpoint.
+
+    Returns:
+        "finalize" - User wants to complete Gate 6
+        "review" - Send to Review Board for another pass
+        "continue" - Keep editing with Claude
+    """
+    print("\n" + "=" * 60)
+    print("CHECKPOINT - Backlog Appears Stable")
+    print("=" * 60)
+    print(f"\nReview cycles completed: {review_cycle}")
+    print(f"Features defined: {len(state.features)}")
+    print("\nOptions:")
+    print("  [1] Finalize - Lock the backlog and complete Gate 6")
+    print("  [2] Review   - Send to Review Board for another critique")
+    print("  [3] Continue - Keep refining with Claude")
+    print()
+
+    while True:
+        choice = input("Choice [1/2/3]: ").strip().lower()
+        if choice in ("1", "finalize", "f", "done", "lock"):
+            return "finalize"
+        elif choice in ("2", "review", "r", "crucible"):
+            return "review"
+        elif choice in ("3", "continue", "c", "keep", ""):
+            return "continue"
+        else:
+            print("Please enter 1, 2, or 3")
+
+
+def run_crucible(state: SpecificationState, cycle: int = 1) -> str:
     """
     Run Review Board critique on draft backlog (The Crucible).
 
     This is the bicameral review step where an external model (Gemini)
     critiques the feature backlog before the user sees it.
+
+    Args:
+        state: Current specification state
+        cycle: Review cycle number (1 = initial, 2+ = re-reviews)
 
     Returns:
         str: Reviewer feedback to inject into Claude's context
@@ -712,12 +805,16 @@ def run_crucible(state: SpecificationState) -> str:
         return ""
 
     print("\n" + "=" * 60)
-    print("THE CRUCIBLE - Review Board Analysis")
+    print(f"THE CRUCIBLE - Review Board Analysis (Cycle {cycle})")
     print("=" * 60)
     print("Sending feature backlog for external review...")
 
-    # Save v1 draft snapshot
-    save_features(state, tag="v1_draft")
+    # Save snapshot with cycle-appropriate tag
+    if cycle == 1:
+        tag = "v1_draft"
+    else:
+        tag = f"v{cycle}_refined"
+    save_features(state, tag=tag)
 
     # Build review context
     context = {
@@ -1183,6 +1280,10 @@ def run_repl(state: SpecificationState) -> None:
     print(f"\nCurrent phase: {state.phase.upper()}")
     print("Type 'quit' to save and exit, 'status' to see progress.\n")
 
+    # Track review cycles for Gate 6
+    review_cycle = 1
+    pending_finalize = False  # Set when user chooses to finalize at checkpoint
+
     # Show refinement instructions if starting in that phase
     if state.phase == "refinement":
         # Sync features from features.json if state.features is empty (belt and suspenders)
@@ -1272,6 +1373,69 @@ def run_repl(state: SpecificationState) -> None:
 
             # Extract state updates
             extract_state_updates(assistant_message, state)
+
+            # Gate 6 Stability Checkpoint
+            # After Claude responds in refinement, check if backlog is stable
+            if state.phase == "refinement" and not pending_finalize:
+                if detect_stability(assistant_message, state):
+                    checkpoint_choice = prompt_stability_checkpoint(state, review_cycle)
+
+                    if checkpoint_choice == "finalize":
+                        # User wants to finalize - tell Claude to wrap up
+                        pending_finalize = True
+                        state.messages.append({
+                            "role": "user",
+                            "content": "Let's finalize. Output the final features JSON and say GATE 6 COMPLETE."
+                        })
+                        print("\n(Finalizing...)")
+                        final_response = call_claude_cli(
+                            format_conversation(
+                                SYSTEM_PROMPT.format(phase="REFINEMENT") + "\n\n" + GATE_PROMPTS["refinement"],
+                                state.messages,
+                                ""
+                            )
+                        )
+                        state.messages.append({"role": "assistant", "content": final_response})
+                        print(f"\nArchitect: {final_response}")
+                        extract_state_updates(final_response, state)
+                        # Let the gate completion check handle the rest
+                        assistant_message = final_response
+
+                    elif checkpoint_choice == "review":
+                        # Send to Review Board for another pass
+                        review_cycle += 1
+                        reviewer_feedback = run_crucible(state, cycle=review_cycle)
+
+                        if reviewer_feedback:
+                            state.messages.append({
+                                "role": "user",
+                                "content": f"""SYSTEM: Review Board Feedback (Cycle {review_cycle})
+
+{reviewer_feedback}
+
+Please address this feedback and update the features JSON."""
+                            })
+                            print("\n(Processing reviewer feedback...)")
+                            review_response = call_claude_cli(
+                                format_conversation(
+                                    SYSTEM_PROMPT.format(phase="REFINEMENT") + "\n\n" + GATE_PROMPTS["refinement"],
+                                    state.messages,
+                                    ""
+                                )
+                            )
+                            state.messages.append({"role": "assistant", "content": review_response})
+                            print(f"\nArchitect: {review_response}")
+                            extract_state_updates(review_response, state)
+                        else:
+                            print("\n[Review Board not available or approved]")
+
+                        save_state(state)
+                        continue  # Back to conversation loop
+
+                    else:  # continue
+                        # User wants to keep editing - just continue the loop
+                        save_state(state)
+                        continue
 
             # Check for gate completion
             next_phase = extract_gate_completion(assistant_message)
