@@ -123,7 +123,7 @@ def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
     try:
         process = subprocess.Popen(
             ["claude", "--print", "--output-format", "stream-json",
-             "--include-partial-messages", "--dangerously-skip-permissions"],
+             "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -135,6 +135,7 @@ def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
         process.stdin.close()
 
         full_response = []
+        final_result = None
         last_activity = time.time()
 
         while True:
@@ -154,15 +155,24 @@ def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
                 # Parse streaming JSON and show real-time output
                 try:
                     data = json.loads(line)
-                    if data.get("type") == "content_block_delta":
-                        delta = data.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            full_response.append(text)
-                            # Print actual text as it streams
-                            print(text, end="", flush=True)
-                    elif data.get("type") == "message_stop":
-                        break
+
+                    # Stream events are wrapped: {"type":"stream_event","event":{...}}
+                    if data.get("type") == "stream_event":
+                        event = data.get("event", {})
+                        if event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text = delta.get("text", "")
+                                full_response.append(text)
+                                # Print actual text as it streams
+                                print(text, end="", flush=True)
+                        elif event.get("type") == "message_stop":
+                            pass  # Continue to get final result
+
+                    # Final result contains the complete response
+                    elif data.get("type") == "result":
+                        final_result = data.get("result", "")
+
                 except json.JSONDecodeError:
                     pass
 
@@ -175,16 +185,20 @@ def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
         # Get any remaining output
         remaining = process.stdout.read()
         if remaining:
-            try:
-                for line in remaining.strip().split("\n"):
-                    if line:
+            for line in remaining.strip().split("\n"):
+                if line:
+                    try:
                         data = json.loads(line)
-                        if data.get("type") == "content_block_delta":
-                            delta = data.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                full_response.append(delta.get("text", ""))
-            except json.JSONDecodeError:
-                pass
+                        if data.get("type") == "stream_event":
+                            event = data.get("event", {})
+                            if event.get("type") == "content_block_delta":
+                                delta = event.get("delta", {})
+                                if delta.get("type") == "text_delta":
+                                    full_response.append(delta.get("text", ""))
+                        elif data.get("type") == "result":
+                            final_result = data.get("result", "")
+                    except json.JSONDecodeError:
+                        pass
 
         process.wait()
 
@@ -192,6 +206,9 @@ def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
             stderr = process.stderr.read()
             raise subprocess.CalledProcessError(process.returncode, "claude", stderr=stderr)
 
+        # Prefer the final result if available, otherwise use streamed content
+        if final_result is not None:
+            return final_result
         return "".join(full_response)
 
     except FileNotFoundError:
