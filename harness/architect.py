@@ -1328,6 +1328,46 @@ def run_repl(state: SpecificationState) -> None:
             print_status(state)
             continue
 
+        # /review command - manually trigger Gemini review in Gate 6
+        if user_input.lower() in ("/review", "review", "/crucible", "crucible"):
+            if state.phase != "refinement":
+                print("\n[/review is only available in Gate 6 (refinement phase)]")
+                continue
+
+            if not REVIEW_BOARD_AVAILABLE:
+                print("\n[Review Board not available - check config]")
+                continue
+
+            review_cycle += 1
+            reviewer_feedback = run_crucible(state, cycle=review_cycle)
+
+            if reviewer_feedback:
+                # Inject feedback and get Claude's response
+                state.messages.append({
+                    "role": "user",
+                    "content": f"""SYSTEM: Review Board Feedback (Cycle {review_cycle})
+
+{reviewer_feedback}
+
+Please address this feedback and update the features JSON."""
+                })
+                print("\n(Processing reviewer feedback...)")
+                review_response = call_claude_cli(
+                    format_conversation(
+                        SYSTEM_PROMPT.format(phase="REFINEMENT") + "\n\n" + GATE_PROMPTS["refinement"],
+                        state.messages,
+                        ""
+                    )
+                )
+                state.messages.append({"role": "assistant", "content": review_response})
+                print(f"\nArchitect: {review_response}")
+                extract_state_updates(review_response, state)
+            else:
+                print("\n[Review Board approved or returned no feedback]")
+
+            save_state(state)
+            continue
+
         # Gate 6: Conversational refinement - input flows to Claude
         # (No more command-based handling - Claude handles changes naturally)
 
