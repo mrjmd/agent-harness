@@ -1417,10 +1417,10 @@ Please address this feedback and update the features JSON."""
             # Extract state updates
             extract_state_updates(assistant_message, state)
 
-            # In refinement phase, save features whenever Claude outputs JSON
+            # In refinement phase, save versioned snapshot whenever Claude outputs JSON
             if state.phase == "refinement" and "```json" in assistant_message and state.features:
-                save_features(state)  # No tag = just update main file
-                print("  [Features updated]")
+                save_features(state, tag="draft")  # Creates timestamped snapshot in history/
+                print("  [Features snapshot saved]")
 
             # Gate 6 Stability Checkpoint
             # After Claude responds in refinement, check if backlog is stable
