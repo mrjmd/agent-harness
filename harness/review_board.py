@@ -339,7 +339,7 @@ For each LEGACY/ANTIPATTERN, suggest the modern alternative.
 Output the annotated patterns in the same format, adding your classification.
 """
 
-BACKLOG_PROMPT = """You are a Principal Product Manager reviewing a Feature Backlog.
+BACKLOG_PROMPT = """You are a Principal Product Manager conducting a DEEP REVIEW of a Feature Backlog.
 
 You have been given the FULL specification context from all planning gates:
 - Gate 1: Problem Discovery (target users, constraints, scope)
@@ -349,8 +349,7 @@ You have been given the FULL specification context from all planning gates:
 
 CRITICAL: Review the backlog IN THE CONTEXT of these documents.
 - If the spec says "single-user app" or "v1 scope", do NOT raise enterprise scaling concerns
-- If the spec says "SQLite", do NOT suggest PostgreSQL clustering or sharding
-- If the spec explicitly defers something to "post-v1", do NOT flag it as missing
+- If the spec says "SQLite", do NOT suggest PostgreSQL clustering
 - Your feedback must be appropriate for the STATED scope and constraints
 
 SPECIFICATION CONTEXT:
@@ -359,29 +358,86 @@ SPECIFICATION CONTEXT:
 ADDITIONAL CONTEXT:
 {context}
 
-FIND issues that are RELEVANT to the stated scope:
-1. **Missing Flows**: Did we forget logout? Error states? Loading indicators?
-2. **Dependency Gaps**: Does Feature B require Feature A but they're mis-ordered?
-3. **Scope Creep**: Is any feature too big for the stated v1 scope?
-4. **Vague Criteria**: Are acceptance criteria testable and falsifiable?
-5. **Edge Case Coverage**: Are the Gate 4 edge cases reflected in features?
-6. **Constraint Violations**: Does any feature contradict the stated technical decisions?
+---
+
+## SYSTEMATIC CROSS-REFERENCE ANALYSIS
+
+For each section below, identify specific gaps and issues:
+
+### 1. GATE 1 → FEATURES: Problem Coverage
+- Which problems identified in Gate 1 are NOT addressed by any feature?
+- Which user pain points lack a corresponding solution in the features?
+- Are the stated constraints (budget, timeline, single-user, etc.) respected?
+- Does every "must-have" from problem discovery have a feature?
+
+### 2. GATE 2 → FEATURES: Solution Alignment
+- Does the feature set implement the CHOSEN approach from Gate 2?
+- Are we accidentally including elements from REJECTED approaches?
+- Are the stated trade-offs (what we're NOT doing) being honored?
+- Does the feature scope match the solution scope?
+
+### 3. GATE 3 → FEATURES: Technical Feasibility
+- Can each feature be implemented with the stated tech stack?
+- Are there features that imply technologies NOT in the tech plan?
+- Do the features respect the architectural boundaries defined?
+- Are there features that would require infrastructure changes not mentioned?
+
+### 4. GATE 4 → FEATURES: Edge Case Coverage
+- Which edge cases from Gate 4 have explicit handling in features?
+- Which edge cases are mentioned but have NO corresponding feature?
+- Are error states and recovery paths defined as features or acceptance criteria?
+- Are there NEW edge cases implied by features that weren't in Gate 4?
+
+### 5. IMPLICIT ASSUMPTIONS
+- What assumptions are the features making that aren't spelled out anywhere?
+- What domain knowledge is assumed but not documented?
+- Are there business rules embedded in features that should be explicit?
+- What happens when those assumptions are wrong?
+
+### 6. USER JOURNEY COMPLETENESS
+- Walk through each user persona from Gate 1 - can they accomplish their goals?
+- What is the user's FIRST interaction? Is it covered?
+- What is the user's LAST interaction (logout, close, export)? Is it covered?
+- Are all state transitions handled (loading, success, error, empty)?
+- What happens when the user makes a mistake? Can they recover?
+
+### 7. FEATURE DEPENDENCIES & ORDERING
+- Which features MUST be built before others?
+- Are there circular dependencies?
+- Is the priority order achievable given dependencies?
+- What is the minimum viable subset that delivers value?
+
+### 8. ACCEPTANCE CRITERIA QUALITY
+- Are acceptance criteria testable and falsifiable?
+- Could two developers read the same criteria and build the same thing?
+- Are there criteria that are vague ("user-friendly", "fast", "intuitive")?
+- Do criteria specify what happens on failure, not just success?
+
+---
+
+## OUTPUT FORMAT
 
 For each issue found, specify:
-- Which feature ID is affected (or "NEW" if missing)
-- What the problem is
-- Your recommended fix
 
-Be thorough, but stay within the stated scope. Do NOT suggest over-engineering.
+ISSUE [N]: [Gate X → Features Gap] or [Category]
+- Feature ID: (which feature, or "NEW" or "MISSING")
+- Problem: (specific, actionable description)
+- Evidence: (quote from gate doc that isn't addressed)
+- Recommendation: (concrete fix)
 
-Format:
-ISSUE 1: [Feature ID or NEW]
-- Problem: ...
-- Recommendation: ...
+---
 
-After listing issues, provide a verdict:
-- APPROVED: Backlog is ready for implementation within stated scope
-- REVISE: Issues must be addressed first
+## FINAL VERDICT
+
+After your analysis, provide:
+
+**COVERAGE SCORE**: X/8 sections have no critical issues
+
+**VERDICT**:
+- APPROVED: Backlog is ready for implementation
+- REVISE: Issues must be addressed (list blocking issues)
+
+**TOP 3 PRIORITIES**: If revisions needed, what are the most important fixes?
 """
 
 GENERIC_PROMPT = """You are reviewing the following output for quality and correctness.
