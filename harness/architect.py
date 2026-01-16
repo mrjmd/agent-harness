@@ -1354,7 +1354,12 @@ def run_repl(state: SpecificationState) -> None:
             continue
 
         # /review command - manually trigger Gemini review in Gate 6
-        if user_input.lower() in ("/review", "review", "/crucible", "crucible"):
+        # /review full - force fresh review with full context (resets cycle to 1)
+        user_lower = user_input.lower()
+        is_review_cmd = user_lower in ("/review", "review", "/crucible", "crucible")
+        is_full_review = user_lower in ("/review full", "review full", "/crucible full")
+
+        if is_review_cmd or is_full_review:
             if state.phase != "refinement":
                 print("\n[/review is only available in Gate 6 (refinement phase)]")
                 continue
@@ -1363,7 +1368,13 @@ def run_repl(state: SpecificationState) -> None:
                 print("\n[Review Board not available - check config]")
                 continue
 
-            review_cycle += 1
+            if is_full_review:
+                # Reset to cycle 1 to force full context
+                review_cycle = 1
+                print("\n[Forcing full context review - resetting to cycle 1]")
+            else:
+                review_cycle += 1
+
             reviewer_feedback = run_crucible(state, cycle=review_cycle)
 
             if reviewer_feedback:
