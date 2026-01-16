@@ -93,9 +93,8 @@ def get_reviewer(provider: str = "manual") -> ReviewProvider:
         from .manual import ManualReviewer
         return ManualReviewer()
 
-    # Future providers will be added here
-    # elif provider == "gemini":
-    #     from .gemini import GeminiReviewer
-    #     return GeminiReviewer()
+    elif provider == "gemini":
+        from .gemini import GeminiReviewer
+        return GeminiReviewer()
 
     raise ValueError(f"Unknown review provider: {provider}")

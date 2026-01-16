@@ -68,6 +68,7 @@ CORE_FILES=(
     "harness/coding/review.py"
     "harness/reviewers/__init__.py"
     "harness/reviewers/base.py"
+    "harness/reviewers/gemini.py"
     "harness/reviewers/openai_reviewer.py"
 )
 

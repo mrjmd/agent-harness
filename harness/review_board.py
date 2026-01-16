@@ -122,10 +122,11 @@ def _validate_provider_config() -> None:
     """Warn if configured provider is not implemented."""
     config = load_review_config()
     provider = config.get("provider", "manual")
-    if provider != "manual":
+    valid_providers = ["manual", "gemini"]
+    if provider not in valid_providers:
         print(f"WARNING: Review board provider '{provider}' is not implemented.")
+        print(f"Available providers: {', '.join(valid_providers)}")
         print("Falling back to 'manual' (clipboard-based) review.")
-        print("Available providers: manual")
 
 
 # Validate provider config when review board is enabled
@@ -466,15 +467,17 @@ def request_review(
     """
     Request review using the configured provider.
 
-    Currently only 'manual' provider is implemented. Other providers
-    (gemini, claude, openai) are planned for future releases.
+    Supports multiple providers:
+    - manual: Clipboard-based (user pastes into Gemini/ChatGPT)
+    - gemini: Automatic API calls to Google Gemini
 
-    Manual workflow:
-    1. Generate review packet with stage-specific prompt
-    2. Copy to clipboard
-    3. User pastes into Gemini/ChatGPT/other model
-    4. User pastes response back
-    5. Parse response for approval/rejection
+    Configure in .claude/config.json:
+        "reviewBoard": {
+            "enabled": true,
+            "provider": "gemini"  // or "manual"
+        }
+
+    For gemini provider, set GOOGLE_API_KEY or GEMINI_API_KEY env var.
 
     Args:
         stage: Review stage name
@@ -485,8 +488,50 @@ def request_review(
     Returns:
         ReviewResult with approval status and feedback
     """
+    config = load_review_config()
+    provider = config.get("provider", "manual")
     max_cycles = get_max_cycles()
 
+    # Use factory to get appropriate reviewer
+    if provider != "manual":
+        try:
+            from .reviewers import get_reviewer
+            reviewer = get_reviewer(provider)
+
+            print(f"\n{'=' * 60}")
+            print(f"REVIEW BOARD - {stage.upper()} (Cycle {cycle}/{max_cycles})")
+            print(f"Provider: {provider}")
+            print(f"{'=' * 60}")
+            print(f"Sending to {provider.capitalize()} API...")
+
+            result = reviewer.review(stage, context, output, cycle)
+
+            # Record in working memory
+            if MEMORY_AVAILABLE:
+                record_decision(
+                    "review_board",
+                    f"Review: {stage} cycle {cycle}",
+                    context=f"Stage: {stage}, Provider: {provider}",
+                    options=["approve", "reject"],
+                    chosen="approved" if result.approved else "rejected",
+                    rationale=result.feedback[:200] if result.feedback else "Approved"
+                )
+
+            if result.approved:
+                print(f"\n[{provider.upper()}] APPROVED")
+            else:
+                print(f"\n[{provider.upper()}] REVISE REQUESTED")
+                if result.feedback:
+                    print(f"\nFeedback:\n{result.feedback[:1500]}")
+
+            return result
+
+        except Exception as e:
+            print(f"\nWarning: {provider} provider failed: {e}")
+            print("Falling back to manual review...")
+            # Fall through to manual review
+
+    # Manual review workflow
     packet = generate_packet(stage, context, output)
     clipboard_success = copy_to_clipboard(packet)
 
