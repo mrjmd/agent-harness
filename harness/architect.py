@@ -292,7 +292,21 @@ def load_state() -> Optional[SpecificationState]:
 
     try:
         data = json.loads(SESSION_PATH.read_text())
-        return SpecificationState(**data)
+        state = SpecificationState(**data)
+
+        # Sync features from features.json if state.features is empty but file exists
+        # This handles the case where user manually re-enters refinement phase
+        if not state.features and FEATURES_PATH.exists():
+            try:
+                fdata = json.loads(FEATURES_PATH.read_text())
+                if isinstance(fdata, dict) and "features" in fdata:
+                    state.features = [f for f in fdata["features"] if f.get("id") != "example-001"]
+                elif isinstance(fdata, list):
+                    state.features = fdata
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+
+        return state
     except (json.JSONDecodeError, TypeError) as e:
         print(f"Warning: Could not load session: {e}")
         return None
@@ -1085,6 +1099,19 @@ def run_repl(state: SpecificationState) -> None:
 
     # Show refinement instructions if starting in that phase
     if state.phase == "refinement":
+        # Sync features from features.json if state.features is empty (belt and suspenders)
+        if not state.features and FEATURES_PATH.exists():
+            try:
+                data = json.loads(FEATURES_PATH.read_text())
+                if isinstance(data, dict) and "features" in data:
+                    state.features = [f for f in data["features"] if f.get("id") != "example-001"]
+                elif isinstance(data, list):
+                    state.features = data
+                save_state(state)  # Persist the sync
+                print("(Synced features from features.json)")
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+
         print("Backlog Refinement - Review your features before coding begins.")
         print("Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
         print("")
