@@ -165,7 +165,14 @@ class GeminiReviewer:
         """
         # Import prompts from review_board to stay DRY
         try:
-            from ..review_board import REVIEW_PROMPTS, GENERIC_PROMPT
+            # Try multiple import paths (package vs direct execution)
+            try:
+                from harness.review_board import REVIEW_PROMPTS, GENERIC_PROMPT
+            except ImportError:
+                try:
+                    from ..review_board import REVIEW_PROMPTS, GENERIC_PROMPT
+                except ImportError:
+                    from review_board import REVIEW_PROMPTS, GENERIC_PROMPT
             template = REVIEW_PROMPTS.get(stage, GENERIC_PROMPT)
         except ImportError:
             # Fallback if import fails

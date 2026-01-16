@@ -495,7 +495,15 @@ def request_review(
     # Use factory to get appropriate reviewer
     if provider != "manual":
         try:
-            from .reviewers import get_reviewer
+            # Try multiple import paths (package vs direct execution)
+            try:
+                from harness.reviewers import get_reviewer
+            except ImportError:
+                try:
+                    from .reviewers import get_reviewer
+                except ImportError:
+                    from reviewers import get_reviewer
+
             reviewer = get_reviewer(provider)
 
             print(f"\n{'=' * 60}")
