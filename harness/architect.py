@@ -507,25 +507,41 @@ Only generate features.json when ALL checks pass.
 When ready, generate the JSON and say: "GATE 5 COMPLETE. Specification saved to specs/features.json"
 """,
 
-    "refinement": """## GATE 6: Backlog Refinement
+    "refinement": """## GATE 6: Conversational Refinement
 
-Review the generated feature backlog before coding begins.
+Your objective: Groom the backlog through dialogue until it is ready for implementation.
 
-COMMANDS (type these directly):
-- `list` - Show all features with IDs and priorities
-- `split <id>` - Break a feature into smaller pieces
-- `reorder <id> <new_priority>` - Change feature priority
-- `drop <id>` - Remove a feature from backlog
-- `refine <id>` - Edit feature description/criteria
-- `finalize` - Lock backlog and proceed to coding
+YOUR PROTOCOL:
+1. **Present the Backlog**: Summarize the current features and their priorities
+2. **Proactively Identify Issues**: Point out potential problems (dependencies, scope, gaps)
+3. **Listen and Refine**: When the user requests changes, update the list naturally
 
-REVIEW CHECKLIST:
-- Dependencies: Does Feature 3 need Feature 1 first?
-- Granularity: Any feature >1 day? Split it.
-- Priorities: Is the order correct for MVP?
+WHEN THE USER REQUESTS A CHANGE:
+- Acknowledge the change conversationally ("Good call, I've moved X before Y...")
+- Output the FULL updated features array in a ```json``` code block
+- The harness will silently update features.json in the background
 
-Type `list` to see your features, then use commands to refine.
-When satisfied, type: `finalize`
+EXAMPLE EXCHANGE:
+User: "Move the admin panel after user profile"
+You: "Good call - that lets us reuse the user settings component. I've moved Admin Panel to priority 3.
+```json
+{"features": [...updated list with new priorities...]}
+```
+What else should we adjust?"
+
+REVIEW CHECKLIST (proactively discuss these):
+- Dependencies: Does Feature B require Feature A but they're mis-ordered?
+- Granularity: Any feature too big for one iteration? Suggest splitting.
+- Missing flows: Did we forget logout, error states, loading indicators?
+- Testability: Are acceptance criteria actually falsifiable?
+
+EXIT CRITERIA:
+[ ] User says "finalize", "lock it", "ready", or similar confirmation
+[ ] Dependencies are logically ordered
+[ ] No features are too large to implement
+
+When the user confirms they're ready, output the final JSON and say:
+"GATE 6 COMPLETE. Backlog locked."
 """
 }
 
@@ -651,12 +667,28 @@ def synthesize_features(state: SpecificationState) -> dict:
     return {"features": features}
 
 
-def save_features(state: SpecificationState) -> None:
-    """Save features.json."""
+def save_features(state: SpecificationState, tag: str = None) -> None:
+    """Save features.json with optional version snapshot.
+
+    Args:
+        state: Current specification state
+        tag: Optional tag for versioned snapshot (e.g., 'v1_draft', 'v2_refined')
+    """
     data = synthesize_features(state)
     SPECS_DIR.mkdir(parents=True, exist_ok=True)
     FEATURES_PATH.write_text(json.dumps(data, indent=2))
-    print(f"\nSaved {len(data['features'])} features to {FEATURES_PATH}")
+
+    # Save versioned snapshot if tag provided
+    if tag:
+        history_dir = SPECS_DIR / "history"
+        history_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = history_dir / f"features_{tag}_{timestamp}.json"
+        snapshot_path.write_text(json.dumps(data, indent=2))
+        print(f"\nSaved {len(data['features'])} features to {FEATURES_PATH}")
+        print(f"  Snapshot: {snapshot_path.name}")
+    else:
+        print(f"\nSaved {len(data['features'])} features to {FEATURES_PATH}")
 
 
 def save_tech_plan(content: str) -> None:
@@ -666,8 +698,63 @@ def save_tech_plan(content: str) -> None:
     print(f"\nSaved technical plan to {TECH_PLAN_PATH}")
 
 
+def run_crucible(state: SpecificationState) -> str:
+    """
+    Run Review Board critique on draft backlog (The Crucible).
+
+    This is the bicameral review step where an external model (Gemini)
+    critiques the feature backlog before the user sees it.
+
+    Returns:
+        str: Reviewer feedback to inject into Claude's context
+    """
+    if not REVIEW_BOARD_AVAILABLE:
+        return ""
+
+    print("\n" + "=" * 60)
+    print("THE CRUCIBLE - Review Board Analysis")
+    print("=" * 60)
+    print("Sending feature backlog for external review...")
+
+    # Save v1 draft snapshot
+    save_features(state, tag="v1_draft")
+
+    # Build review context
+    context = {
+        "product": state.product_idea[:200] if state.product_idea else "",
+        "problem": state.problem_statement[:300] if state.problem_statement else "",
+        "approach": json.dumps(state.chosen_approach)[:300] if state.chosen_approach else "",
+    }
+
+    # Include tech plan if available
+    tech_plan = ""
+    if GATE_3_PATH.exists():
+        try:
+            tech_plan = GATE_3_PATH.read_text()[:2000]
+        except IOError:
+            pass
+
+    features_json = json.dumps(synthesize_features(state), indent=2)
+
+    # Request review via Review Board
+    result = request_review(
+        stage="backlog",
+        context=context,
+        output=f"TECHNICAL PLAN:\n{tech_plan}\n\nFEATURE BACKLOG:\n{features_json}"
+    )
+
+    print("\n" + "=" * 60)
+    if result.approved:
+        print("Crucible: APPROVED - Backlog passes review")
+    else:
+        print("Crucible: REVISE - Issues found, Claude will address them")
+    print("=" * 60)
+
+    return result.feedback
+
+
 # =============================================================================
-# Gate 6: Refinement Commands
+# Gate 6: Refinement Commands (Legacy - being replaced by conversational flow)
 # =============================================================================
 
 def display_feature_table(state: SpecificationState) -> None:
@@ -691,7 +778,6 @@ def display_feature_table(state: SpecificationState) -> None:
 
     print("-" * 70)
     print(f"Total: {len(state.features)} features")
-    print("\nCommands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
 
 
 def handle_split_command(state: SpecificationState, cmd: str) -> None:
@@ -1112,9 +1198,8 @@ def run_repl(state: SpecificationState) -> None:
             except (json.JSONDecodeError, FileNotFoundError):
                 pass
 
-        print("Backlog Refinement - Review your features before coding begins.")
-        print("Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
-        print("")
+        print("Backlog Refinement - Discuss changes with the Architect.")
+        print("Say 'ready', 'finalize', or 'lock it' when the backlog is complete.\n")
         display_feature_table(state)
 
     # Track pending questions from the last assistant message
@@ -1142,59 +1227,8 @@ def run_repl(state: SpecificationState) -> None:
             print_status(state)
             continue
 
-        # Gate 6: Refinement commands (direct REPL commands, no Claude call)
-        if state.phase == "refinement":
-            cmd_lower = user_input.lower()
-
-            if cmd_lower == "list":
-                display_feature_table(state)
-                continue
-
-            if cmd_lower.startswith("split "):
-                handle_split_command(state, user_input)
-                save_state(state)
-                continue
-
-            if cmd_lower.startswith("reorder "):
-                handle_reorder_command(state, user_input)
-                save_state(state)
-                continue
-
-            if cmd_lower.startswith("drop "):
-                handle_drop_command(state, user_input)
-                save_state(state)
-                continue
-
-            if cmd_lower.startswith("refine "):
-                handle_refine_command(state, user_input)
-                save_state(state)
-                continue
-
-            if cmd_lower == "finalize":
-                if not state.features:
-                    print("\nCannot finalize: No features defined.")
-                    continue
-
-                print("\n" + "=" * 60)
-                print("FINALIZING BACKLOG")
-                print("=" * 60)
-                display_feature_table(state)
-                print("")
-                confirm = input("Lock this backlog and proceed to coding? (y/N): ").strip().lower()
-                if confirm == "y":
-                    state.phase = "complete"
-                    save_features(state)
-                    save_state(state)
-                    break
-                else:
-                    print("Cancelled. Continue refining or type 'finalize' when ready.")
-                continue
-
-            # If not a recognized command, show help
-            print(f"\nUnknown command: {user_input}")
-            print("Available commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
-            print("Or type 'quit' to save and exit, 'status' to see progress.")
-            continue
+        # Gate 6: Conversational refinement - input flows to Claude
+        # (No more command-based handling - Claude handles changes naturally)
 
         # Record Q&A from previous exchange if we had pending questions
         if MEMORY_AVAILABLE and pending_questions:
@@ -1295,11 +1329,47 @@ def run_repl(state: SpecificationState) -> None:
                 print(f"ADVANCING TO: {state.phase.upper()}")
                 print(f"{'=' * 40}")
 
-                # Show refinement instructions when entering that phase
+                # Gate 5→6 transition: Run crucible and inject feedback
                 if state.phase == "refinement":
-                    print("\nReview your feature backlog before coding begins.")
-                    print("Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
-                    print("")
+                    reviewer_feedback = ""
+
+                    # Run crucible only if Review Board is enabled for backlog stage
+                    if REVIEW_BOARD_AVAILABLE and should_review("backlog"):
+                        reviewer_feedback = run_crucible(state)
+                    else:
+                        # Still save v1 draft for history even without review
+                        save_features(state, tag="v1_draft")
+
+                    # Inject context for Claude's first refinement response
+                    if reviewer_feedback:
+                        state.messages.append({
+                            "role": "user",
+                            "content": f"""SYSTEM: Entering Gate 6 (Refinement).
+
+The Review Board analyzed the backlog and provided this feedback:
+
+{reviewer_feedback}
+
+Please:
+1. Address valid concerns by updating the features
+2. Present any changes you made
+3. Ask the user about points that need their decision
+4. Output the updated features in a JSON block
+
+Begin by summarizing what you've fixed and what needs user input."""
+                        })
+                    else:
+                        # No review - just enter refinement mode
+                        state.messages.append({
+                            "role": "user",
+                            "content": """SYSTEM: Entering Gate 6 (Refinement).
+
+Present the current feature backlog and ask if anything needs adjustment.
+When the user is satisfied, output the final JSON and say "GATE 6 COMPLETE"."""
+                        })
+
+                    print("\nBacklog Refinement - Discuss changes with the Architect.")
+                    print("Say 'ready', 'finalize', or 'lock it' when complete.\n")
                     display_feature_table(state)
 
                 # Update working memory with gate completion
@@ -1448,8 +1518,8 @@ def print_status(state: SpecificationState) -> None:
     g6_ok = state.phase == "complete"
     print(f"\nGate 6 (Refinement): {'OK' if g6_ok else 'INCOMPLETE'}")
     if state.phase == "refinement":
-        print("  Status: IN PROGRESS - reviewing backlog")
-        print("  Commands: list, split <id>, reorder <id> <pri>, drop <id>, refine <id>, finalize")
+        print("  Status: IN PROGRESS - conversational refinement")
+        print("  Say 'ready' or 'finalize' when complete")
     elif g6_ok:
         print("  Status: Backlog finalized")
     else:

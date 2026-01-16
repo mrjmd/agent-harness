@@ -338,6 +338,40 @@ For each LEGACY/ANTIPATTERN, suggest the modern alternative.
 Output the annotated patterns in the same format, adding your classification.
 """
 
+BACKLOG_PROMPT = """You are a Principal Product Manager reviewing a Feature Backlog.
+
+FEATURE BACKLOG:
+{output}
+
+CONTEXT:
+{context}
+
+Compare this backlog against the Project Goals and Technical Plan.
+
+FIND:
+1. **Missing Flows**: Did we forget logout? Error states? Loading indicators? Password reset?
+2. **Dependency Gaps**: Does Feature B require Feature A but they're mis-ordered?
+3. **Scope Creep**: Is any feature too big to implement in one iteration?
+4. **Vague Criteria**: Are acceptance criteria actually testable and falsifiable?
+5. **Edge Case Coverage**: Does each feature have at least 3 edge cases defined?
+
+For each issue found, specify:
+- Which feature ID is affected (or "NEW" if missing)
+- What the problem is
+- Your recommended fix
+
+Be thorough. Don't be nice. Your job is to catch problems BEFORE implementation.
+
+Format:
+ISSUE 1: [Feature ID or NEW]
+- Problem: ...
+- Recommendation: ...
+
+After listing issues, provide a verdict:
+- APPROVED: Backlog is ready for implementation
+- REVISE: Issues must be addressed first
+"""
+
 GENERIC_PROMPT = """You are reviewing the following output for quality and correctness.
 
 OUTPUT:
@@ -354,6 +388,7 @@ REVIEW_PROMPTS = {
     "implementer": IMPLEMENTER_PROMPT,
     "doctor": DOCTOR_PROMPT,
     "archaeologist": ARCHAEOLOGIST_PROMPT,
+    "backlog": BACKLOG_PROMPT,
 }
 
 
