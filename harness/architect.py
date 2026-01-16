@@ -1396,7 +1396,11 @@ Please address this feedback and update the features JSON."""
                     )
                 )
                 state.messages.append({"role": "assistant", "content": review_response})
-                print(f"\nArchitect: {review_response}")
+                # Strip JSON dump from display (still saved to state)
+                display_response = review_response.split("## Updated Features JSON")[0].strip()
+                display_response = display_response.split("## FEATURE BACKLOG")[0].strip()
+                display_response = display_response.split("```json")[0].strip()
+                print(f"\nArchitect: {display_response}")
                 extract_state_updates(review_response, state)
                 # Save updated features to disk
                 if state.features:
@@ -1508,7 +1512,11 @@ Please address this feedback and update the features JSON."""
                                 )
                             )
                             state.messages.append({"role": "assistant", "content": review_response})
-                            print(f"\nArchitect: {review_response}")
+                            # Strip JSON dump from display (still saved to state)
+                            display_response = review_response.split("## Updated Features JSON")[0].strip()
+                            display_response = display_response.split("## FEATURE BACKLOG")[0].strip()
+                            display_response = display_response.split("```json")[0].strip()
+                            print(f"\nArchitect: {display_response}")
                             extract_state_updates(review_response, state)
                             # Save updated features to disk
                             if state.features:
