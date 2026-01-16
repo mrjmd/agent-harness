@@ -1362,6 +1362,9 @@ Please address this feedback and update the features JSON."""
                 state.messages.append({"role": "assistant", "content": review_response})
                 print(f"\nArchitect: {review_response}")
                 extract_state_updates(review_response, state)
+                # Save updated features to disk
+                if state.features:
+                    save_features(state, tag=f"v{review_cycle}_reviewed")
             else:
                 print("\n[Review Board approved or returned no feedback]")
 
@@ -1413,6 +1416,11 @@ Please address this feedback and update the features JSON."""
 
             # Extract state updates
             extract_state_updates(assistant_message, state)
+
+            # In refinement phase, save features whenever Claude outputs JSON
+            if state.phase == "refinement" and "```json" in assistant_message and state.features:
+                save_features(state)  # No tag = just update main file
+                print("  [Features updated]")
 
             # Gate 6 Stability Checkpoint
             # After Claude responds in refinement, check if backlog is stable
@@ -1466,6 +1474,9 @@ Please address this feedback and update the features JSON."""
                             state.messages.append({"role": "assistant", "content": review_response})
                             print(f"\nArchitect: {review_response}")
                             extract_state_updates(review_response, state)
+                            # Save updated features to disk
+                            if state.features:
+                                save_features(state, tag=f"v{review_cycle}_reviewed")
                         else:
                             print("\n[Review Board not available or approved]")
 
