@@ -146,6 +146,74 @@ class ProjectType(Enum):
     UNKNOWN = "unknown"
 
 
+# Test templates for different project types
+TEST_TEMPLATES = {
+    ProjectType.WEB_APP: {
+        "language": "typescript",
+        "test_dir": "tests/e2e",
+        "extension": ".spec.ts",
+        "run_command": "npx playwright test",
+    },
+    ProjectType.API: {
+        "language": "python",
+        "test_dir": "tests",
+        "extension": "_test.py",
+        "run_command": "pytest",
+    },
+    ProjectType.CLI: {
+        "language": "python",
+        "test_dir": "tests",
+        "extension": "_test.py",
+        "run_command": "pytest",
+    },
+    ProjectType.LIBRARY: {
+        "language": "python",
+        "test_dir": "tests",
+        "extension": "_test.py",
+        "run_command": "pytest",
+    },
+    ProjectType.UNKNOWN: {
+        "language": "typescript",
+        "test_dir": "tests/e2e",
+        "extension": ".spec.ts",
+        "run_command": "npx playwright test",
+    },
+}
+
+
+def get_test_template(project_type: ProjectType) -> dict:
+    """
+    Get test template for project type, with language detection override.
+
+    Detects actual project language from files and returns appropriate template.
+    """
+    is_python = (
+        Path("requirements.txt").exists() or
+        Path("pyproject.toml").exists() or
+        Path("setup.py").exists()
+    )
+    is_node = Path("package.json").exists()
+
+    # Python-only projects always use pytest
+    if is_python and not is_node:
+        return TEST_TEMPLATES[ProjectType.API]
+
+    # Node-only projects use appropriate template
+    if is_node and not is_python:
+        if project_type == ProjectType.LIBRARY:
+            # Node libraries typically use jest
+            return {
+                "language": "typescript",
+                "test_dir": "tests",
+                "extension": ".test.ts",
+                "run_command": "npm test",
+            }
+        return TEST_TEMPLATES.get(project_type, TEST_TEMPLATES[ProjectType.WEB_APP])
+
+    # Mixed projects - prefer the project type detection
+    return TEST_TEMPLATES.get(project_type, TEST_TEMPLATES[ProjectType.WEB_APP])
+
+
 @dataclass
 class LintResult:
     tool: str
@@ -1225,13 +1293,75 @@ Add your recorded fixtures here.
 """
             readme_path.write_text(readme_content)
 
-    # Create base test file
+    # Detect project type for language-aware test file
+    project_type = detect_project_type()
+    template = get_test_template(project_type)
+
+    # Create base test file - language aware
     test_dir = Path("tests/webhooks")
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_path = test_dir / "baseline.spec.ts"
-    if not baseline_path.exists():
-        baseline_content = '''import { test, expect } from "@playwright/test";
+    if template["language"] == "python":
+        baseline_path = test_dir / "test_baseline.py"
+        if not baseline_path.exists():
+            baseline_content = '''"""
+Baseline Webhook Tests - Python/pytest version
+
+Usage: pytest tests/webhooks/test_baseline.py
+"""
+import json
+import os
+from pathlib import Path
+import pytest
+import requests
+
+FIXTURES_DIR = Path("tests/fixtures/webhooks")
+BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
+
+
+def load_fixtures(service: str) -> list[dict]:
+    """Load fixture files for a service."""
+    service_dir = FIXTURES_DIR / service
+    if not service_dir.exists():
+        return []
+
+    fixtures = []
+    for file in service_dir.glob("*.json"):
+        with open(file) as f:
+            fixtures.append({
+                "name": file.stem,
+                "payload": json.load(f)
+            })
+    return fixtures
+
+
+class TestWebhookBaseline:
+    """Baseline webhook tests - add your webhook endpoint tests here."""
+
+    @pytest.mark.skip(reason="placeholder - add webhook tests after recording fixtures")
+    def test_placeholder(self):
+        pass
+
+    # Example:
+    # @pytest.fixture
+    # def stripe_fixtures(self):
+    #     return load_fixtures("stripe")
+    #
+    # def test_stripe_webhook(self, stripe_fixtures):
+    #     for fixture in stripe_fixtures:
+    #         response = requests.post(
+    #             f"{BASE_URL}/api/webhooks/stripe",
+    #             json=fixture["payload"],
+    #             headers={"stripe-signature": "test_signature"}
+    #         )
+    #         assert response.ok
+'''
+            baseline_path.write_text(baseline_content)
+    else:
+        # TypeScript/Playwright version
+        baseline_path = test_dir / "baseline.spec.ts"
+        if not baseline_path.exists():
+            baseline_content = '''import { test, expect } from "@playwright/test";
 import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 
@@ -1273,7 +1403,7 @@ test.describe("Webhook Baseline Tests", () => {
   });
 });
 '''
-        baseline_path.write_text(baseline_content)
+            baseline_path.write_text(baseline_content)
 
     print(f"Created fixture structure at {fixtures_dir}")
     print(f"Created baseline test at {baseline_path}")
@@ -1767,16 +1897,43 @@ def cmd_solidify() -> int:
 
     print(f"Found {len(verified_routes)} verified routes, {len(verified_services)} verified services")
 
+    # Detect project type and get appropriate test template
+    project_type = detect_project_type()
+    template = get_test_template(project_type)
+
+    print(f"Project type: {project_type.value}")
+    print(f"Generating {template['language']} tests...")
+
     # Generate baseline test via Claude
     routes_json = json.dumps(verified_routes, indent=2)
 
-    prompt = f"""Generate a Playwright test file for these verified working routes.
+    # Language-specific prompts
+    if template["language"] == "python":
+        prompt = f"""Generate a pytest test file for these verified working routes.
 
 VERIFIED ROUTES:
 {routes_json}
 
 Requirements:
-- File will be: tests/e2e/baseline_verified.spec.ts
+- File will be: {template['test_dir']}/test_baseline_verified.py
+- Use pytest and requests library
+- For each route, write a simple smoke test
+- API routes: use requests.get() and check for status < 400
+- Use pytest fixtures for base URL configuration (from environment or default)
+- Just verify the route is reachable and doesn't error
+- Group tests in classes logically (TestAPIHealth, TestAPIEndpoints, etc.)
+
+Output ONLY the Python code, no markdown code blocks or explanations."""
+
+        output_path = Path(f"{template['test_dir']}/test_baseline_verified.py")
+    else:
+        prompt = f"""Generate a Playwright test file for these verified working routes.
+
+VERIFIED ROUTES:
+{routes_json}
+
+Requirements:
+- File will be: {template['test_dir']}/baseline_verified.spec.ts
 - For each route, write a simple smoke test
 - API routes: use request.get() and check for status < 400
 - Page routes: use page.goto() and check for no crash (check title or body exists)
@@ -1786,6 +1943,8 @@ Requirements:
 
 Output ONLY the TypeScript code, no markdown code blocks or explanations."""
 
+        output_path = Path(f"{template['test_dir']}/baseline_verified.spec.ts")
+
     try:
         print("\nGenerating baseline tests via Claude...")
         test_code = call_claude_cli(prompt, timeout=120)
@@ -1794,14 +1953,13 @@ Output ONLY the TypeScript code, no markdown code blocks or explanations."""
         test_code = re.sub(r"^```\w*\n?", "", test_code)
         test_code = re.sub(r"\n?```$", "", test_code)
 
-        output_path = Path("tests/e2e/baseline_verified.spec.ts")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(test_code)
 
         print(f"\nGenerated baseline tests: {output_path}")
         print("\nNext steps:")
         print("  1. Review the generated tests")
-        print("  2. Run: npx playwright test tests/e2e/baseline_verified.spec.ts")
+        print(f"  2. Run: {template['run_command']} {output_path}")
         print("  3. Fix any failures, then commit as your 'Golden Spike'")
 
         return 0

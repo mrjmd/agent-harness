@@ -21,6 +21,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+@dataclass
+class TestRunnerConfig:
+    """Configuration for the test runner."""
+    runner: str  # playwright, pytest, jest, vitest
+    base_cmd: list[str]
+    timeout: int
+    reporter_flag: str
+    file_pattern: str
+
+
 def find_project_root() -> Path:
     """
     Find the project root by walking up from cwd looking for markers.
@@ -52,6 +62,127 @@ def find_project_root() -> Path:
 def get_config_path() -> Path:
     """Get the config path relative to project root."""
     return find_project_root() / ".claude" / "config.json"
+
+
+def detect_test_runner(config: dict) -> str:
+    """
+    Detect test runner from config or project files.
+
+    Priority:
+    1. Explicit testRunner setting in config
+    2. Analyze testCommand string
+    3. Detect from project files (pytest.ini, pyproject.toml)
+    4. Default to playwright
+    """
+    settings = config.get("settings", {})
+
+    # Explicit setting takes priority
+    if "testRunner" in settings:
+        return settings["testRunner"]
+
+    # Analyze testCommand
+    test_cmd = settings.get("testCommand", "")
+    if "pytest" in test_cmd:
+        return "pytest"
+    elif "vitest" in test_cmd:
+        return "vitest"
+    elif "jest" in test_cmd:
+        return "jest"
+
+    # Analyze project files
+    project_root = find_project_root()
+    if (project_root / "pytest.ini").exists():
+        return "pytest"
+    if (project_root / "pyproject.toml").exists():
+        try:
+            content = (project_root / "pyproject.toml").read_text()
+            if "[tool.pytest" in content or "pytest" in content.lower():
+                return "pytest"
+        except IOError:
+            pass
+
+    return "playwright"  # default
+
+
+def get_reporter_flag(runner: str, config: dict) -> str:
+    """
+    Get appropriate reporter flag for the test runner.
+
+    Can be overridden via testReporterFlag in config.
+    """
+    settings = config.get("settings", {})
+
+    # Explicit setting takes priority
+    if "testReporterFlag" in settings:
+        return settings["testReporterFlag"]
+
+    # Defaults per runner
+    defaults = {
+        "playwright": "--reporter=list",
+        "pytest": "-v",
+        "jest": "--verbose",
+        "vitest": "--reporter=verbose",
+    }
+    return defaults.get(runner, "")
+
+
+def get_default_file_pattern(runner: str) -> str:
+    """Get default test file pattern for the runner."""
+    patterns = {
+        "playwright": "tests/e2e/test_{id}.spec.ts",
+        "pytest": "tests/test_{id}.py",
+        "jest": "tests/{id}.test.ts",
+        "vitest": "tests/{id}.test.ts",
+    }
+    return patterns.get(runner, "tests/test_{id}")
+
+
+def load_test_runner_config() -> TestRunnerConfig:
+    """
+    Load full test runner configuration.
+
+    Returns TestRunnerConfig with runner type, command, timeout,
+    reporter flag, and file pattern.
+    """
+    config_path = get_config_path()
+    config = {}
+
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    settings = config.get("settings", {})
+    runner = detect_test_runner(config)
+
+    # Build command
+    default_cmds = {
+        "playwright": "npx playwright test",
+        "pytest": "pytest",
+        "jest": "npx jest",
+        "vitest": "npx vitest run",
+    }
+    test_cmd_str = settings.get("testCommand", default_cmds.get(runner, "npx playwright test"))
+    base_cmd = shlex.split(test_cmd_str)
+
+    # Timeout
+    timeout_ms = settings.get("testTimeout", 120000)
+    timeout_sec = max(10, timeout_ms // 1000)
+
+    # Reporter flag
+    reporter_flag = get_reporter_flag(runner, config)
+
+    # File pattern
+    file_pattern = settings.get("testFilePattern", get_default_file_pattern(runner))
+
+    return TestRunnerConfig(
+        runner=runner,
+        base_cmd=base_cmd,
+        timeout=timeout_sec,
+        reporter_flag=reporter_flag,
+        file_pattern=file_pattern,
+    )
 
 
 def load_test_config() -> tuple[list[str], int]:
@@ -121,7 +252,10 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
     Returns:
         VerificationResult with pass/fail status and details
     """
-    test_file = Path(feature.get("test_file", f"tests/e2e/test_{feature['id']}.spec.ts"))
+    # Get runner config for default test file pattern
+    config = load_test_runner_config()
+    default_test_file = config.file_pattern.format(id=feature['id'])
+    test_file = Path(feature.get("test_file", default_test_file))
 
     # Step 1: Test file must exist
     if not test_file.exists():
@@ -133,30 +267,31 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
         )
 
     # Step 2: THE HARNESS RUNS THE TEST (not the agent!)
-    base_cmd, timeout = load_test_config()
-    full_cmd = base_cmd + [str(test_file), "--reporter=list"]
+    full_cmd = config.base_cmd + [str(test_file)]
+    if config.reporter_flag:
+        full_cmd.append(config.reporter_flag)
 
     try:
         result = subprocess.run(
             full_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=config.timeout,
             cwd=Path.cwd()
         )
     except subprocess.TimeoutExpired:
         return VerificationResult(
             passed=False,
-            reason=f"Test timed out ({timeout}s limit)",
+            reason=f"Test timed out ({config.timeout}s limit)",
             test_file=str(test_file),
-            stderr=f"Test execution exceeded {timeout} second timeout"
+            stderr=f"Test execution exceeded {config.timeout} second timeout"
         )
     except FileNotFoundError:
         return VerificationResult(
             passed=False,
             reason="Test runner not found",
             test_file=str(test_file),
-            stderr=f"Command not found: {' '.join(base_cmd)}. Check your config."
+            stderr=f"Command not found: {' '.join(config.base_cmd)}. Check your config."
         )
 
     tests_pass = result.returncode == 0
@@ -203,7 +338,7 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
 
 def regression_check(exclude_test: str = None) -> RegressionResult:
     """
-    Run ALL e2e tests to catch regressions.
+    Run ALL tests to catch regressions.
 
     This should only be called on the FINAL verification before marking
     a feature as passing, not on every iteration.
@@ -214,10 +349,13 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
     Returns:
         RegressionResult with pass/fail and list of broken tests
     """
-    base_cmd, single_timeout = load_test_config()
+    config = load_test_runner_config()
     # For regression, use 5x single test timeout, capped at 10 minutes
-    regression_timeout = min(single_timeout * 5, 600)
-    full_cmd = base_cmd + ["--reporter=list"]
+    regression_timeout = min(config.timeout * 5, 600)
+
+    full_cmd = list(config.base_cmd)  # Copy to avoid mutation
+    if config.reporter_flag:
+        full_cmd.append(config.reporter_flag)
 
     try:
         result = subprocess.run(
@@ -237,7 +375,7 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
         return RegressionResult(
             passed=False,
             failed_tests=["TEST_RUNNER_NOT_FOUND"],
-            output=f"Command not found: {' '.join(base_cmd)}"
+            output=f"Command not found: {' '.join(config.base_cmd)}"
         )
 
     if result.returncode == 0:
@@ -248,7 +386,7 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
         )
 
     # Parse failed tests from output
-    failed_tests = parse_failed_tests(result.stdout + result.stderr)
+    failed_tests = parse_failed_tests(result.stdout + result.stderr, config.runner)
 
     return RegressionResult(
         passed=False,
@@ -257,28 +395,59 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
     )
 
 
-def parse_failed_tests(output: str) -> list[str]:
+def parse_failed_tests(output: str, runner: str = None) -> list[str]:
     """
-    Parse Playwright output to extract failed test names.
+    Parse test output to extract failed test names.
 
-    Handles various Playwright reporter formats.
+    Supports multiple test runners: playwright, pytest, jest, vitest.
+
+    Args:
+        output: Combined stdout/stderr from test run
+        runner: Test runner type (auto-detected if not provided)
+
+    Returns:
+        List of failed test identifiers
     """
+    if runner is None:
+        config = load_test_runner_config()
+        runner = config.runner
+
     failed = []
 
-    # Pattern for list reporter: "  ✘  1 test_auth.spec.ts:15:5 › Login › should fail with invalid credentials"
-    list_pattern = r"[✘×]\s+\d+\s+(.+\.spec\.ts:\d+:\d+)"
-    matches = re.findall(list_pattern, output)
-    failed.extend(matches)
+    if runner == "pytest":
+        # Pattern: "FAILED tests/test_foo.py::test_bar"
+        pytest_pattern = r"FAILED\s+([\w/]+\.py::\w+)"
+        failed.extend(re.findall(pytest_pattern, output))
 
-    # Pattern for basic failures: "FAILED: test_name.spec.ts"
-    basic_pattern = r"FAILED:\s*(.+\.spec\.ts)"
-    matches = re.findall(basic_pattern, output, re.IGNORECASE)
-    failed.extend(matches)
+        # Short form: "tests/test_foo.py::test_bar FAILED"
+        short_pattern = r"([\w/]+\.py::\w+)\s+FAILED"
+        failed.extend(re.findall(short_pattern, output))
 
-    # Pattern for error context: "Error in tests/e2e/test_foo.spec.ts"
-    error_pattern = r"Error in (tests/e2e/.+\.spec\.ts)"
-    matches = re.findall(error_pattern, output)
-    failed.extend(matches)
+        # Error pattern: "ERROR tests/test_foo.py"
+        error_pattern = r"ERROR\s+([\w/]+\.py)"
+        failed.extend(re.findall(error_pattern, output))
+
+    elif runner in ("jest", "vitest"):
+        # Pattern: "FAIL tests/foo.test.ts"
+        jest_pattern = r"FAIL\s+([\w/]+\.test\.[tj]sx?)"
+        failed.extend(re.findall(jest_pattern, output))
+
+        # Pattern: "✕ test name"
+        fail_pattern = r"[✕×]\s+(.+)"
+        failed.extend(re.findall(fail_pattern, output))
+
+    else:  # playwright (default)
+        # Pattern for list reporter: "  ✘  1 test_auth.spec.ts:15:5 › Login"
+        list_pattern = r"[✘×]\s+\d+\s+(.+\.spec\.ts:\d+:\d+)"
+        failed.extend(re.findall(list_pattern, output))
+
+        # Pattern for basic failures: "FAILED: test_name.spec.ts"
+        basic_pattern = r"FAILED:\s*(.+\.spec\.ts)"
+        failed.extend(re.findall(basic_pattern, output, re.IGNORECASE))
+
+        # Pattern for error context: "Error in tests/e2e/test_foo.spec.ts"
+        error_pattern = r"Error in (tests/e2e/.+\.spec\.ts)"
+        failed.extend(re.findall(error_pattern, output))
 
     # Deduplicate while preserving order
     seen = set()
@@ -319,6 +488,9 @@ def format_verification_feedback(result: VerificationResult) -> str:
 
     This gets injected back into the conversation when verification fails.
     """
+    config = load_test_runner_config()
+    cmd_str = " ".join(config.base_cmd)
+
     if result.passed:
         return f"""
 ✓ VERIFICATION PASSED
@@ -334,7 +506,7 @@ Test file: {result.test_file}
 
 Your claim of completion was REJECTED by the verification system.
 
-The harness ran: npx playwright test {result.test_file}
+The harness ran: {cmd_str} {result.test_file}
 Result: FAILED
 Reason: {result.reason}
 
