@@ -208,7 +208,6 @@ def cmd_loop(args: str) -> str:
     print(f"\nStarting implementation loop ({mode_str}, cadence={cadence})...\n")
 
     # Build sys.argv for the loop main function
-    import sys
     old_argv = sys.argv
     try:
         new_argv = ["loop.py"]
