@@ -19,6 +19,7 @@ TECH_PLAN_PATH = SPECS_DIR / "gate-3-tech-plan.md"
 LEARNINGS_PATH = SPECS_DIR / "learnings.json"
 HEALTH_REPORT_PATH = SPECS_DIR / "health_report.md"
 DEFERRED_PATH = SPECS_DIR / "deferred-scope.md"
+PROJECT_INFO_PATH = SPECS_DIR / "project_info.json"
 
 
 def get_feature_summary() -> Optional[str]:
@@ -276,6 +277,58 @@ def get_codebase_hint() -> str:
     return "## Codebase Structure\n" + "\n".join(hints)
 
 
+def get_project_info() -> Optional[dict]:
+    """Load project info from specs/project_info.json."""
+    if not PROJECT_INFO_PATH.exists():
+        return None
+
+    try:
+        return json.loads(PROJECT_INFO_PATH.read_text())
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def get_project_info_summary() -> Optional[str]:
+    """Get a summary of basic project info for context."""
+    info = get_project_info()
+    if not info:
+        return None
+
+    lines = ["## Project Info"]
+
+    if info.get("name"):
+        lines.append(f"Name: {info['name']}")
+
+    if info.get("description"):
+        lines.append(f"Description: {info['description']}")
+
+    if info.get("dev_server"):
+        lines.append(f"Dev server: {info['dev_server']}")
+
+    if info.get("dev_url"):
+        lines.append(f"Dev URL: {info['dev_url']}")
+
+    if info.get("default_credentials"):
+        creds = info["default_credentials"]
+        lines.append(f"Default login: {creds.get('username', 'N/A')} / {creds.get('password', 'N/A')}")
+
+    if info.get("notes"):
+        lines.append(f"Notes: {info['notes']}")
+
+    return "\n".join(lines) if len(lines) > 1 else None
+
+
+def is_project_info_missing() -> bool:
+    """Check if basic project info has been captured."""
+    return not PROJECT_INFO_PATH.exists()
+
+
+def save_project_info(info: dict) -> None:
+    """Save project info to specs/project_info.json."""
+    SPECS_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECT_INFO_PATH.write_text(json.dumps(info, indent=2))
+
+
 def build_project_context() -> str:
     """
     Build a complete context string for Claude queries.
@@ -284,6 +337,11 @@ def build_project_context() -> str:
     understanding of the current project state.
     """
     context_parts = []
+
+    # Basic project info (dev server, credentials, etc.)
+    project_info = get_project_info_summary()
+    if project_info:
+        context_parts.append(project_info)
 
     # Feature backlog status
     feature_summary = get_feature_summary()

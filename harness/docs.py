@@ -26,13 +26,14 @@ from cli import call_reflection as _call_claude_cli
 
 
 # Paths
-DOCS_DIR = Path("docs")
+SPECS_DIR = Path("specs")
+DOCS_DIR = SPECS_DIR / "autodocs"  # Use specs/autodocs to avoid conflicts with project docs/
 META_PATH = DOCS_DIR / "_meta.json"
 INDEX_PATH = DOCS_DIR / "index.md"
 FEATURES_DIR = DOCS_DIR / "features"
-SPECS_DIR = Path("specs")
 FEATURES_PATH = SPECS_DIR / "features.json"
 PRODUCT_SPEC_PATH = SPECS_DIR / "product_spec.md"
+PROJECT_INFO_PATH = SPECS_DIR / "project_info.json"  # Basic project info (dev server, credentials, etc.)
 
 
 # =============================================================================

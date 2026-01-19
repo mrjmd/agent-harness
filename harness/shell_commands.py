@@ -13,7 +13,13 @@ from typing import Optional, Callable
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from shell_context import get_quick_status, build_project_context
+from shell_context import (
+    get_quick_status,
+    build_project_context,
+    is_project_info_missing,
+    save_project_info,
+    get_project_info,
+)
 
 
 # =============================================================================
@@ -49,6 +55,7 @@ Navigation:
   /help, /h, /?       Show this help
   /status             Show project status summary
   /context            Show full project context
+  /setup              Capture basic project info (dev server, credentials)
   /clear              Clear conversation history
   /quit, /exit, /q    Exit the shell
 
@@ -125,6 +132,55 @@ def cmd_context(args: str) -> str:
 def cmd_clear(args: str) -> str:
     """Clear conversation history (handled in shell.py)."""
     return "__CLEAR__"  # Special return value handled by shell
+
+
+@register_command("setup")
+def cmd_setup(args: str) -> str:
+    """Capture basic project info (dev server, credentials, etc.)."""
+    print("\n=== Project Setup ===")
+    print("Capture basic info about your project for documentation and context.\n")
+
+    # Load existing info if any
+    existing = get_project_info() or {}
+
+    def prompt_field(field: str, description: str, default: str = "") -> str:
+        existing_val = existing.get(field, default)
+        prompt_str = f"{description}"
+        if existing_val:
+            prompt_str += f" [{existing_val}]"
+        prompt_str += ": "
+        try:
+            value = input(prompt_str).strip()
+            return value if value else existing_val
+        except (EOFError, KeyboardInterrupt):
+            return existing_val
+
+    info = {}
+
+    info["name"] = prompt_field("name", "Project name")
+    info["description"] = prompt_field("description", "Brief description")
+    info["dev_server"] = prompt_field("dev_server", "Dev server command (e.g., npm run dev)")
+    info["dev_url"] = prompt_field("dev_url", "Dev URL (e.g., http://localhost:3000)")
+
+    # Credentials
+    print("\nDefault credentials (for testing/dev):")
+    has_creds = existing.get("default_credentials", {})
+    username = prompt_field("username", "  Username", has_creds.get("username", ""))
+    password = prompt_field("password", "  Password", has_creds.get("password", ""))
+    if username or password:
+        info["default_credentials"] = {"username": username, "password": password}
+
+    info["notes"] = prompt_field("notes", "\nAny other important notes")
+
+    # Remove empty fields
+    info = {k: v for k, v in info.items() if v}
+
+    if info:
+        save_project_info(info)
+        print("\nProject info saved to specs/project_info.json")
+        return ""
+    else:
+        return "\nNo info provided, nothing saved."
 
 
 @register_command("quit", aliases=["exit", "q"])

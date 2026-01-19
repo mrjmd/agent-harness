@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from cli import call_claude_cli, STRICT_READ_ONLY_TOOLS
 from shell_commands import handle_slash_command, get_command_completions
-from shell_context import build_project_context, get_quick_status
+from shell_context import build_project_context, get_quick_status, is_project_info_missing
 
 
 # =============================================================================
@@ -68,6 +68,10 @@ class HarnessShell:
 
         if status["health_status"]:
             print(f"Health: {status['health_status'].upper()}")
+
+        # Hint about setup if project info is missing
+        if is_project_info_missing():
+            print("\nTip: Run /setup to capture basic project info (dev server, credentials)")
 
         print()
 
