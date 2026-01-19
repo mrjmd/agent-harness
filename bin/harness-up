@@ -58,9 +58,14 @@ CORE_FILES=(
     "harness/architect.py"
     "harness/archaeologist.py"
     "harness/doctor.py"
+    "harness/docs.py"
     "harness/review_board.py"
     "harness/memory.py"
     "harness/cli.py"
+    "harness/shell.py"
+    "harness/shell_commands.py"
+    "harness/shell_context.py"
+    "harness/__main__.py"
     "harness/coding/loop.py"
     "harness/coding/verify.py"
     "harness/coding/git_utils.py"
@@ -198,9 +203,14 @@ else
         "$HARNESS_SOURCE/harness/architect.py" \
         "$HARNESS_SOURCE/harness/archaeologist.py" \
         "$HARNESS_SOURCE/harness/doctor.py" \
+        "$HARNESS_SOURCE/harness/docs.py" \
         "$HARNESS_SOURCE/harness/review_board.py" \
         "$HARNESS_SOURCE/harness/memory.py" \
         "$HARNESS_SOURCE/harness/cli.py" \
+        "$HARNESS_SOURCE/harness/shell.py" \
+        "$HARNESS_SOURCE/harness/shell_commands.py" \
+        "$HARNESS_SOURCE/harness/shell_context.py" \
+        "$HARNESS_SOURCE/harness/__main__.py" \
         ./harness/
 
     # Sync coding loop files
