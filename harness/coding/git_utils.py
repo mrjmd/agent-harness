@@ -7,6 +7,8 @@ Simple and critical: commit on green, reset on red.
 """
 
 import subprocess
+import json
+import os
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -95,9 +97,45 @@ def create_checkpoint(feature_id: str) -> str:
         return ""
 
 
+def get_commit_author() -> str:
+    """
+    Get commit author from config or environment or use default.
+
+    Priority order:
+    1. HARNESS_GIT_AUTHOR environment variable
+    2. .claude/config.json settings.gitAuthor
+    3. Default: "Agent Harness <harness@agent.local>"
+
+    Returns:
+        Author string in "Name <email>" format
+    """
+    # 1. Environment variable
+    env_author = os.environ.get("HARNESS_GIT_AUTHOR")
+    if env_author:
+        return env_author
+
+    # 2. Config file
+    config_path = Path(".claude/config.json")
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            author = config.get("settings", {}).get("gitAuthor")
+            if author:
+                return author
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 3. Default
+    return "Agent Harness <harness@agent.local>"
+
+
 def commit_feature(feature_id: str, description: str = "") -> bool:
     """
     Commit all changes for a passing feature.
+
+    Author can be configured via:
+    - HARNESS_GIT_AUTHOR environment variable
+    - .claude/config.json settings.gitAuthor
 
     Returns True if commit succeeded, False otherwise.
     """
@@ -115,9 +153,12 @@ def commit_feature(feature_id: str, description: str = "") -> bool:
     else:
         message = f"PASSING: {feature_id}"
 
+    # Get configurable author
+    author = get_commit_author()
+
     # Commit
     result = subprocess.run(
-        ["git", "commit", "-m", message, "--author", "Agent Harness <agent@harness.local>"],
+        ["git", "commit", "-m", message, "--author", author],
         capture_output=True,
         text=True
     )
@@ -130,28 +171,62 @@ def commit_feature(feature_id: str, description: str = "") -> bool:
         return False
 
 
-def rollback() -> bool:
+class RollbackError(Exception):
+    """Raised when rollback fails to clean the working directory."""
+    pass
+
+
+def rollback(strict: bool = True) -> bool:
     """
     Rollback all uncommitted changes.
 
     Used when verification fails after agent claimed success.
+
+    Args:
+        strict: If True (default), raises RollbackError if directory not clean after rollback.
+                If False, just warns and returns False.
+
+    Returns:
+        True if rollback succeeded and working directory is clean.
+        False if rollback failed and strict=False.
+
+    Raises:
+        RollbackError: If rollback fails and strict=True.
     """
     # Discard all staged and unstaged changes
-    subprocess.run(["git", "checkout", "--", "."], capture_output=True)
+    checkout_result = subprocess.run(
+        ["git", "checkout", "--", "."],
+        capture_output=True,
+        text=True
+    )
 
     # Remove untracked files and directories
-    result = subprocess.run(
+    clean_result = subprocess.run(
         ["git", "clean", "-fd"],
         capture_output=True,
         text=True
     )
 
-    if result.returncode == 0:
-        print("Rolled back all uncommitted changes")
-        return True
-    else:
-        print(f"Rollback warning: {result.stderr}")
-        return False
+    # Verify the working directory is actually clean
+    status = get_status()
+
+    if not status.clean:
+        error_msg = (
+            f"Rollback failed to clean working directory!\n"
+            f"  Staged: {status.staged_files}\n"
+            f"  Modified: {status.modified_files}\n"
+            f"  Untracked: {status.untracked_files}\n"
+            f"  checkout stderr: {checkout_result.stderr}\n"
+            f"  clean stderr: {clean_result.stderr}"
+        )
+        if strict:
+            raise RollbackError(error_msg)
+        else:
+            print(f"WARNING: {error_msg}")
+            return False
+
+    print("Rolled back all uncommitted changes")
+    return True
 
 
 def rollback_to_checkpoint(stash_ref: str) -> bool:
@@ -160,8 +235,13 @@ def rollback_to_checkpoint(stash_ref: str) -> bool:
 
     First discards current changes, then applies the stash.
     """
-    # First, clean everything
-    rollback()
+    import re
+
+    # First, clean everything (use non-strict mode to allow partial recovery)
+    try:
+        rollback(strict=False)
+    except RollbackError:
+        print("Warning: Rollback had issues, attempting to restore checkpoint anyway")
 
     if not stash_ref:
         return True  # No checkpoint to restore
@@ -173,12 +253,27 @@ def rollback_to_checkpoint(stash_ref: str) -> bool:
         text=True
     )
 
+    if result.returncode != 0:
+        print(f"Warning: Failed to list stashes: {result.stderr}")
+        return False
+
     stash_index = None
     for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
         if stash_ref in line:
-            # Extract stash@{N} from the line
-            stash_index = line.split(":")[0]
-            break
+            # Extract stash@{N} from the line using regex for robustness
+            # Format: stash@{N}: ...
+            match = re.match(r'^(stash@\{\d+\}):', line)
+            if match:
+                stash_index = match.group(1)
+                break
+            else:
+                # Fallback: try splitting on first colon
+                parts = line.split(":", 1)
+                if parts and parts[0].startswith("stash@{"):
+                    stash_index = parts[0].strip()
+                    break
 
     if stash_index:
         result = subprocess.run(
@@ -186,8 +281,14 @@ def rollback_to_checkpoint(stash_ref: str) -> bool:
             capture_output=True,
             text=True
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            print(f"Restored checkpoint: {stash_ref}")
+            return True
+        else:
+            print(f"Warning: Failed to restore checkpoint: {result.stderr}")
+            return False
 
+    print(f"Warning: Checkpoint '{stash_ref}' not found in stash list")
     return False
 
 

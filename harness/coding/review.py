@@ -33,6 +33,106 @@ class PatternViolation(Exception):
     pass
 
 
+class FileScopeViolation(Exception):
+    """Raised when a file modification violates the feature's file scope."""
+    pass
+
+
+def validate_file_scope(modified_files: list[str], feature: dict) -> None:
+    """
+    Validate that modified files comply with the feature's file_scope restrictions.
+
+    Args:
+        modified_files: List of file paths that were modified
+        feature: The feature dict which may contain file_scope
+
+    Raises:
+        FileScopeViolation: If any file violates scope restrictions
+
+    File scope format in feature:
+        {
+            "file_scope": {
+                "create": ["src/new_file.ts"],     # Files that should be created
+                "modify": ["src/existing.ts"],     # Files that may be modified
+                "forbidden": [".env*", "package.json"]  # Files that must not be touched
+            }
+        }
+    """
+    file_scope = feature.get("file_scope")
+    if not file_scope:
+        return  # No restrictions defined
+
+    violations = []
+
+    # Get scope lists
+    allowed_create = set(file_scope.get("create", []))
+    allowed_modify = set(file_scope.get("modify", []))
+    forbidden_patterns = file_scope.get("forbidden", [])
+
+    # All allowed files
+    all_allowed = allowed_create | allowed_modify
+
+    for file_path in modified_files:
+        path = Path(file_path)
+        if not path.exists():
+            continue  # Deleted files are OK
+
+        # Check forbidden patterns first (glob-style matching)
+        for forbidden_pattern in forbidden_patterns:
+            if _matches_pattern(file_path, forbidden_pattern):
+                violations.append(
+                    f"FORBIDDEN: '{file_path}' matches forbidden pattern '{forbidden_pattern}'"
+                )
+                break
+        else:
+            # Only check if file is in allowed list when scope is defined
+            if all_allowed and file_path not in all_allowed:
+                # Check if it matches any glob pattern in allowed lists
+                matched = False
+                for allowed in all_allowed:
+                    if _matches_pattern(file_path, allowed):
+                        matched = True
+                        break
+
+                if not matched:
+                    violations.append(
+                        f"OUT OF SCOPE: '{file_path}' is not in the allowed file list"
+                    )
+
+    if violations:
+        error_msg = "File scope violations detected:\n" + "\n".join(
+            f"  - {v}" for v in violations
+        )
+        raise FileScopeViolation(error_msg)
+
+
+def _matches_pattern(file_path: str, pattern: str) -> bool:
+    """
+    Check if a file path matches a glob-style pattern.
+
+    Supports:
+    - Exact matches: "src/file.ts"
+    - Wildcards: "*.env", ".env*"
+    - Directory globs: "src/**/*.ts"
+    """
+    import fnmatch
+
+    # Direct match
+    if file_path == pattern:
+        return True
+
+    # Glob match
+    if fnmatch.fnmatch(file_path, pattern):
+        return True
+
+    # Also check just the filename for patterns like "*.env"
+    filename = Path(file_path).name
+    if fnmatch.fnmatch(filename, pattern):
+        return True
+
+    return False
+
+
 def review_changes(modified_files: list[str]) -> list[str]:
     """
     Review modified files for pattern violations.
@@ -141,14 +241,56 @@ def escape_for_regex(text: str) -> str:
     Convert a description to a simple regex pattern.
 
     For complex patterns, this does simple substring matching.
+    Returns a regex pattern that can be used with re.search().
     """
     # If it looks like a regex already (contains special chars), use as-is
-    if any(c in text for c in [".*", "\\s", "\\w", "[", "]", "^", "$"]):
+    regex_indicators = [".*", "\\s", "\\w", "\\d", "[", "]", "^", "$", "(?:", "\\b"]
+    if any(indicator in text for indicator in regex_indicators):
         return text
 
-    # Otherwise, escape special chars for literal matching
-    # But this is too strict - better to not match literally
-    # Instead, return empty to skip regex matching for descriptions
+    # Try to extract a code pattern from the description
+    # Look for backtick-quoted code: `console.log`
+    backtick_match = re.search(r'`([^`]+)`', text)
+    if backtick_match:
+        code_pattern = backtick_match.group(1)
+        # Escape regex special chars for literal matching
+        return re.escape(code_pattern)
+
+    # Look for quoted strings: "console.log" or 'console.log'
+    quote_match = re.search(r'["\']([^"\']+)["\']', text)
+    if quote_match:
+        code_pattern = quote_match.group(1)
+        return re.escape(code_pattern)
+
+    # Look for common code-like patterns at start or end
+    # e.g., "No direct database queries" -> extract nothing useful
+    # e.g., "console.log statements" -> extract "console.log"
+    code_patterns = [
+        r'\b(console\.\w+)\b',  # console.log, console.error, etc
+        r'\b(debugger)\b',       # debugger statements
+        r'\b(eval\s*\()',        # eval() calls
+        r'\b(innerHTML\s*=)',    # innerHTML assignments
+        r'\b(document\.write)',  # document.write
+        r'\b(TODO|FIXME|XXX)\b', # Code annotations
+    ]
+
+    for pattern in code_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return re.escape(match.group(1))
+
+    # For descriptive text without clear code patterns, try to extract key terms
+    # Split on common words and look for technical terms
+    words = text.split()
+    # Filter to technical-looking words (contains . or _ or is camelCase)
+    technical = [w.strip('.,()') for w in words
+                 if '.' in w or '_' in w or (w[0].islower() and any(c.isupper() for c in w[1:]))]
+    if technical:
+        # Use the first technical term as the pattern
+        return re.escape(technical[0])
+
+    # Fallback: return empty string (no pattern to check)
+    # This is better than trying to match arbitrary descriptions
     return ""
 
 
@@ -187,39 +329,197 @@ def get_allowed_imports() -> set[str]:
     return allowed
 
 
+def _strip_js_comments_and_strings(content: str) -> str:
+    """
+    Remove comments and string literals from JS/TS code to avoid false positives.
+
+    This is a simplified approach that handles most common cases.
+    """
+    result = []
+    i = 0
+    n = len(content)
+
+    while i < n:
+        # Single-line comment
+        if i + 1 < n and content[i:i+2] == '//':
+            # Skip to end of line
+            while i < n and content[i] != '\n':
+                i += 1
+            continue
+
+        # Multi-line comment
+        if i + 1 < n and content[i:i+2] == '/*':
+            i += 2
+            while i + 1 < n and content[i:i+2] != '*/':
+                i += 1
+            i += 2  # Skip */
+            continue
+
+        # Template literal (backtick strings) - skip entire thing
+        if content[i] == '`':
+            result.append(' ')  # Keep a space to maintain spacing
+            i += 1
+            while i < n:
+                if content[i] == '\\' and i + 1 < n:
+                    i += 2  # Skip escaped char
+                    continue
+                if content[i] == '`':
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        # Regular strings - but preserve import/require statements
+        # Only skip strings that aren't part of import/require
+        if content[i] in '"\'':
+            # Check if this might be part of an import statement
+            # Look back for 'from' or 'require' or 'import'
+            lookback = content[max(0, i-20):i].lower()
+            if 'from' in lookback or 'require' in lookback or 'import' in lookback:
+                result.append(content[i])
+                i += 1
+                continue
+
+            # Not an import, skip this string
+            quote = content[i]
+            result.append(' ')
+            i += 1
+            while i < n:
+                if content[i] == '\\' and i + 1 < n:
+                    i += 2
+                    continue
+                if content[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        result.append(content[i])
+        i += 1
+
+    return ''.join(result)
+
+
 def extract_js_imports(content: str) -> list[str]:
-    """Extract import statements from JS/TS file content."""
+    """
+    Extract import statements from JS/TS file content.
+
+    Filters out imports in comments and non-import string literals.
+    """
+    # Pre-process to remove comments (but preserve import strings)
+    processed = _strip_js_comments_and_strings(content)
     imports = []
 
     # ES6 imports: import ... from 'package'
-    for match in re.finditer(r'import\s+.*?\s+from\s+[\'"]([^\'"]+)[\'"]', content):
+    for match in re.finditer(r'import\s+.*?\s+from\s+[\'"]([^\'"]+)[\'"]', processed):
         imports.append(match.group(1))
 
     # Side-effect imports: import 'package'
-    for match in re.finditer(r'import\s+[\'"]([^\'"]+)[\'"]', content):
+    for match in re.finditer(r'import\s+[\'"]([^\'"]+)[\'"]', processed):
         imports.append(match.group(1))
 
     # Dynamic imports: import('package')
-    for match in re.finditer(r'import\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', content):
+    for match in re.finditer(r'import\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', processed):
         imports.append(match.group(1))
 
     # require()
-    for match in re.finditer(r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', content):
+    for match in re.finditer(r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', processed):
         imports.append(match.group(1))
 
     return imports
 
 
+def _strip_python_comments_and_strings(content: str) -> str:
+    """
+    Remove comments and docstrings from Python code to avoid false positives.
+
+    Preserves the line structure so ^ and $ anchors still work.
+    """
+    lines = content.split('\n')
+    result = []
+    in_multiline_string = False
+    multiline_quote = None
+
+    for line in lines:
+        if in_multiline_string:
+            # Look for end of multiline string
+            end_pos = line.find(multiline_quote)
+            if end_pos != -1:
+                in_multiline_string = False
+                # Replace the multiline content with spaces
+                result.append(' ' * len(line))
+            else:
+                result.append(' ' * len(line))
+            continue
+
+        # Check for # comment (after handling strings)
+        new_line = []
+        i = 0
+        n = len(line)
+
+        while i < n:
+            # Triple-quoted string (start of multiline)
+            if i + 2 < n and line[i:i+3] in ('"""', "'''"):
+                quote = line[i:i+3]
+                # Look for end on same line
+                end_pos = line.find(quote, i + 3)
+                if end_pos != -1:
+                    # String ends on same line - skip it
+                    new_line.append(' ' * (end_pos - i + 3))
+                    i = end_pos + 3
+                else:
+                    # Multiline string starts
+                    in_multiline_string = True
+                    multiline_quote = quote
+                    new_line.append(' ' * (n - i))
+                    break
+                continue
+
+            # Single/double quoted string
+            if line[i] in '"\'':
+                quote = line[i]
+                new_line.append(line[i])
+                i += 1
+                while i < n:
+                    if line[i] == '\\' and i + 1 < n:
+                        new_line.append(line[i:i+2])
+                        i += 2
+                        continue
+                    new_line.append(line[i])
+                    if line[i] == quote:
+                        i += 1
+                        break
+                    i += 1
+                continue
+
+            # Comment - stop processing this line
+            if line[i] == '#':
+                break
+
+            new_line.append(line[i])
+            i += 1
+
+        result.append(''.join(new_line))
+
+    return '\n'.join(result)
+
+
 def extract_python_imports(content: str) -> list[str]:
-    """Extract import statements from Python file content."""
+    """
+    Extract import statements from Python file content.
+
+    Filters out imports in comments and docstrings.
+    """
+    # Pre-process to remove comments and docstrings
+    processed = _strip_python_comments_and_strings(content)
     imports = []
 
     # import package
-    for match in re.finditer(r'^import\s+(\w+)', content, re.MULTILINE):
+    for match in re.finditer(r'^import\s+(\w+)', processed, re.MULTILINE):
         imports.append(match.group(1))
 
     # from package import ...
-    for match in re.finditer(r'^from\s+(\w+)', content, re.MULTILINE):
+    for match in re.finditer(r'^from\s+(\w+)', processed, re.MULTILINE):
         imports.append(match.group(1))
 
     return imports

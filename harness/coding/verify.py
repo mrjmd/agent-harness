@@ -340,20 +340,75 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
     )
 
 
+def get_configured_ports() -> list[int]:
+    """
+    Get configured dev server ports from config and project files.
+
+    Returns:
+        List of ports to clean up (always includes common defaults)
+    """
+    ports = set()
+
+    # Always include common dev server ports
+    common_ports = [3000, 3001, 8000, 8080, 5173, 5174, 4200]
+    ports.update(common_ports)
+
+    # Try to read from harness config
+    config_path = get_config_path()
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            if port := config.get("settings", {}).get("devPort"):
+                ports.add(int(port))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try to detect from package.json dev script
+    package_json = Path("package.json")
+    if package_json.exists():
+        try:
+            pkg = json.loads(package_json.read_text())
+            dev_script = pkg.get("scripts", {}).get("dev", "")
+            # Match patterns like --port 8000, -p 3001, PORT=8080
+            import re
+            for match in re.finditer(r'(?:--port|-p)\s*(\d+)|PORT=(\d+)', dev_script):
+                port_str = match.group(1) or match.group(2)
+                if port_str:
+                    ports.add(int(port_str))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try to read from project_info.json
+    project_info = Path("specs/project_info.json")
+    if project_info.exists():
+        try:
+            info = json.loads(project_info.read_text())
+            dev_url = info.get("dev_url", "")
+            # Extract port from URL like http://localhost:8000
+            import re
+            match = re.search(r':(\d+)', dev_url)
+            if match:
+                ports.add(int(match.group(1)))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return sorted(ports)
+
+
 def cleanup_stale_processes() -> None:
     """
     Kill stale server processes that might interfere with tests.
 
     Targets:
     - next-server (Next.js dev/prod server)
-    - node processes on port 3000
+    - node/python processes on configured dev ports
 
     This helps prevent "address already in use" and server crash issues.
     """
     platform = sys.platform
 
     # Kill processes by name
-    stale_patterns = ["next-server", "next dev", "next start"]
+    stale_patterns = ["next-server", "next dev", "next start", "vite", "uvicorn", "flask run"]
 
     for pattern in stale_patterns:
         try:
@@ -372,23 +427,26 @@ def cleanup_stale_processes() -> None:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    # Kill anything on port 3000 (common dev server port)
-    try:
-        if platform == "darwin" or platform.startswith("linux"):
-            # Find PID using port 3000
-            result = subprocess.run(
-                ["lsof", "-ti", ":3000"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.stdout.strip():
-                pids = result.stdout.strip().split('\n')
-                for pid in pids:
-                    if pid.strip():
-                        subprocess.run(["kill", "-9", pid.strip()], capture_output=True, timeout=5)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    # Kill anything on configured dev server ports
+    ports = get_configured_ports()
+
+    for port in ports:
+        try:
+            if platform == "darwin" or platform.startswith("linux"):
+                # Find PID using port
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        if pid.strip():
+                            subprocess.run(["kill", "-9", pid.strip()], capture_output=True, timeout=5)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     # Brief pause to let OS clean up
     time.sleep(0.5)

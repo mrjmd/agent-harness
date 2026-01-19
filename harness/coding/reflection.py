@@ -62,12 +62,57 @@ Example:
 ]
 ```
 
-Categories: api_gotcha, package_issue, pattern, environment, test_insight, other
+Categories: api_gotcha, package_issue, pattern, environment, test_insight, blocker, other
 
 If no significant lessons were learned (straightforward implementation), return:
 ```json
 []
 ```
+
+## Iteration History:
+
+{iteration_history}
+"""
+
+
+FAILURE_REFLECTION_PROMPT = """
+Feature FAILED after multiple attempts: {feature_id}
+Description: {description}
+
+The feature could not be completed. Review the iteration history below and extract lessons about WHY it failed.
+
+## What to look for:
+
+1. **Root Cause**: What was the fundamental issue that prevented completion?
+2. **Blockers**: Any missing dependencies, configurations, or infrastructure issues?
+3. **Approach Issues**: Were there flawed assumptions or wrong approaches tried?
+4. **Environment Issues**: Missing tools, services, or incorrect setup?
+5. **Knowledge Gaps**: What information was missing that would have helped?
+
+## Output Format:
+
+Return a JSON array of lessons. Each lesson should be:
+- Focused on what went wrong and why
+- Actionable for future attempts
+- Clear about the blocker or issue
+
+Example:
+```json
+[
+  {{
+    "category": "blocker",
+    "lesson": "Feature requires Redis but it's not running locally",
+    "context": "Add Redis to docker-compose or document as prerequisite"
+  }},
+  {{
+    "category": "approach_issue",
+    "lesson": "Tried to mock database when integration test was needed",
+    "context": "The test requires real database to validate constraints"
+  }}
+]
+```
+
+Categories: blocker, approach_issue, missing_info, environment, api_gotcha, package_issue, other
 
 ## Iteration History:
 
@@ -100,14 +145,17 @@ def call_claude_cli(prompt_text: str) -> str:
 
 def run_reflection(
     feature: dict,
-    iteration_history: list[dict]
+    iteration_history: list[dict],
+    failed: bool = False
 ) -> list[Learning]:
     """
-    Extract lessons learned after feature completion.
+    Extract lessons learned after feature completion or failure.
 
     Args:
-        feature: The completed feature dict
+        feature: The feature dict
         iteration_history: List of iteration records with prompts/responses/errors
+        failed: If True, use failure-focused reflection prompt to extract
+                lessons from what went wrong
 
     Returns:
         List of Learning objects extracted from reflection
@@ -115,8 +163,9 @@ def run_reflection(
     # Format iteration history
     history_text = format_iteration_history(iteration_history)
 
-    # Build prompt
-    prompt = REFLECTION_PROMPT.format(
+    # Build prompt - use failure prompt if feature failed
+    prompt_template = FAILURE_REFLECTION_PROMPT if failed else REFLECTION_PROMPT
+    prompt = prompt_template.format(
         feature_id=feature.get("id", "unknown"),
         description=feature.get("description", ""),
         iteration_history=history_text
@@ -124,7 +173,7 @@ def run_reflection(
 
     try:
         response_text = call_claude_cli(prompt)
-        learnings = parse_learnings(response_text, feature)
+        learnings = parse_learnings(response_text, feature, failed=failed)
         return learnings
 
     except Exception as e:
@@ -155,7 +204,7 @@ def format_iteration_history(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def parse_learnings(response_text: str, feature: dict) -> list[Learning]:
+def parse_learnings(response_text: str, feature: dict, failed: bool = False) -> list[Learning]:
     """Parse the JSON array of learnings from the response."""
 
     # Try to extract JSON from the response
@@ -183,13 +232,24 @@ def parse_learnings(response_text: str, feature: dict) -> list[Learning]:
         if not lesson_text:
             continue
 
+        # Add failure marker to ID if from failed feature
+        id_suffix = f"-fail-{i+1}" if failed else f"-{i+1}"
+        category = raw.get("category", "other")
+
+        # Add context about this being from a failed attempt
+        context = raw.get("context", "")
+        if failed and context:
+            context = f"[FROM FAILED ATTEMPT] {context}"
+        elif failed:
+            context = "[FROM FAILED ATTEMPT]"
+
         learning = Learning(
-            id=f"learn-{feature.get('id', 'unknown')}-{i+1}",
+            id=f"learn-{feature.get('id', 'unknown')}{id_suffix}",
             timestamp=timestamp,
             feature_id=feature.get("id", "unknown"),
-            category=raw.get("category", "other"),
+            category=category,
             lesson=lesson_text,
-            context=raw.get("context", "")
+            context=context
         )
         learnings.append(learning)
 

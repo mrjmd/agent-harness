@@ -559,6 +559,152 @@ def audit_type_health() -> int:
     return 0
 
 
+def parse_test_output(output: str, framework_hint: str = "") -> Optional[TestResult]:
+    """
+    Parse test output from various frameworks.
+
+    Supports: Jest, Vitest, Playwright, Mocha, Jasmine, RSpec, pytest, unittest
+    """
+    # Jest/Vitest: "Tests: X passed, Y failed, Z total"
+    match = re.search(r"(\d+) passed.*?(\d+) failed.*?(\d+) total", output)
+    if match:
+        passed, failed, total = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        return TestResult(
+            framework="jest/vitest",
+            total=total,
+            passed=passed,
+            failed=failed,
+            skipped=total - passed - failed,
+            output=output[:3000]
+        )
+
+    # Playwright: "X passed" and optionally "Y failed"
+    match = re.search(r"(\d+) passed", output)
+    if match:
+        passed = int(match.group(1))
+        failed_match = re.search(r"(\d+) failed", output)
+        failed = int(failed_match.group(1)) if failed_match else 0
+        skipped_match = re.search(r"(\d+) skipped", output)
+        skipped = int(skipped_match.group(1)) if skipped_match else 0
+
+        if "playwright" in output.lower() or framework_hint == "playwright":
+            return TestResult(
+                framework="playwright",
+                total=passed + failed + skipped,
+                passed=passed,
+                failed=failed,
+                skipped=skipped,
+                output=output[:3000]
+            )
+
+    # Mocha: "X passing", "Y failing", "Z pending"
+    passing_match = re.search(r"(\d+) passing", output)
+    failing_match = re.search(r"(\d+) failing", output)
+    pending_match = re.search(r"(\d+) pending", output)
+    if passing_match or failing_match:
+        passed = int(passing_match.group(1)) if passing_match else 0
+        failed = int(failing_match.group(1)) if failing_match else 0
+        pending = int(pending_match.group(1)) if pending_match else 0
+        return TestResult(
+            framework="mocha",
+            total=passed + failed + pending,
+            passed=passed,
+            failed=failed,
+            skipped=pending,
+            output=output[:3000]
+        )
+
+    # Jasmine: "X specs, Y failures"
+    match = re.search(r"(\d+) specs?,\s*(\d+) failures?", output)
+    if match:
+        total, failed = int(match.group(1)), int(match.group(2))
+        return TestResult(
+            framework="jasmine",
+            total=total,
+            passed=total - failed,
+            failed=failed,
+            skipped=0,
+            output=output[:3000]
+        )
+
+    # RSpec: "X examples, Y failures"
+    match = re.search(r"(\d+) examples?,\s*(\d+) failures?", output)
+    if match:
+        total, failed = int(match.group(1)), int(match.group(2))
+        pending_match = re.search(r"(\d+) pending", output)
+        pending = int(pending_match.group(1)) if pending_match else 0
+        return TestResult(
+            framework="rspec",
+            total=total,
+            passed=total - failed - pending,
+            failed=failed,
+            skipped=pending,
+            output=output[:3000]
+        )
+
+    # pytest: "X passed, Y failed" or "X passed"
+    passed_match = re.search(r"(\d+) passed", output)
+    failed_match = re.search(r"(\d+) failed", output)
+    error_match = re.search(r"(\d+) error", output)
+    skipped_match = re.search(r"(\d+) skipped", output)
+    if passed_match or failed_match:
+        passed = int(passed_match.group(1)) if passed_match else 0
+        failed = int(failed_match.group(1)) if failed_match else 0
+        errors = int(error_match.group(1)) if error_match else 0
+        skipped = int(skipped_match.group(1)) if skipped_match else 0
+        return TestResult(
+            framework="pytest",
+            total=passed + failed + errors + skipped,
+            passed=passed,
+            failed=failed + errors,
+            skipped=skipped,
+            output=output[:3000]
+        )
+
+    # Python unittest: "Ran X tests" and "OK" or "FAILED (failures=Y)"
+    match = re.search(r"Ran (\d+) tests?", output)
+    if match:
+        total = int(match.group(1))
+        if "OK" in output:
+            return TestResult(
+                framework="unittest",
+                total=total,
+                passed=total,
+                failed=0,
+                skipped=0,
+                output=output[:3000]
+            )
+        fail_match = re.search(r"failures?=(\d+)", output)
+        error_match = re.search(r"errors?=(\d+)", output)
+        failed = int(fail_match.group(1)) if fail_match else 0
+        errors = int(error_match.group(1)) if error_match else 0
+        return TestResult(
+            framework="unittest",
+            total=total,
+            passed=total - failed - errors,
+            failed=failed + errors,
+            skipped=0,
+            output=output[:3000]
+        )
+
+    # Go test: "ok" or "FAIL" per package, "--- PASS:" / "--- FAIL:"
+    pass_matches = re.findall(r"--- PASS:", output)
+    fail_matches = re.findall(r"--- FAIL:", output)
+    if pass_matches or fail_matches:
+        passed = len(pass_matches)
+        failed = len(fail_matches)
+        return TestResult(
+            framework="go test",
+            total=passed + failed,
+            passed=passed,
+            failed=failed,
+            skipped=0,
+            output=output[:3000]
+        )
+
+    return None
+
+
 def audit_test_health() -> Optional[TestResult]:
     """Run existing test suite and measure health."""
     # Try npm test
@@ -566,61 +712,53 @@ def audit_test_health() -> Optional[TestResult]:
         try:
             pkg = json.loads(Path("package.json").read_text())
             if "test" in pkg.get("scripts", {}):
-                code, stdout, stderr = run_shell(["npm", "test", "--", "--passWithNoTests"], timeout=300)
+                test_script = pkg["scripts"]["test"]
 
-                # Parse Jest/Vitest output
+                # Detect framework from script
+                framework_hint = ""
+                if "playwright" in test_script.lower():
+                    framework_hint = "playwright"
+                elif "mocha" in test_script.lower():
+                    framework_hint = "mocha"
+                elif "jasmine" in test_script.lower():
+                    framework_hint = "jasmine"
+
+                code, stdout, stderr = run_shell(["npm", "test", "--", "--passWithNoTests"], timeout=300)
                 output = stdout + stderr
 
-                # Look for summary line: "Tests: X passed, Y failed, Z total"
-                match = re.search(r"(\d+) passed.*?(\d+) failed.*?(\d+) total", output)
-                if match:
-                    passed, failed, total = int(match.group(1)), int(match.group(2)), int(match.group(3))
-                    return TestResult(
-                        framework="jest/vitest",
-                        total=total,
-                        passed=passed,
-                        failed=failed,
-                        skipped=total - passed - failed,
-                        output=output[:3000]
-                    )
-
-                # Playwright format
-                match = re.search(r"(\d+) passed.*?(\d+) failed", output)
-                if match:
-                    passed, failed = int(match.group(1)), int(match.group(2))
-                    return TestResult(
-                        framework="playwright",
-                        total=passed + failed,
-                        passed=passed,
-                        failed=failed,
-                        skipped=0,
-                        output=output[:3000]
-                    )
+                result = parse_test_output(output, framework_hint)
+                if result:
+                    return result
 
         except (json.JSONDecodeError, IOError):
             pass
 
     # Try pytest
-    if Path("pytest.ini").exists() or Path("pyproject.toml").exists():
+    if Path("pytest.ini").exists() or Path("pyproject.toml").exists() or list(Path(".").glob("**/test_*.py")):
         code, stdout, stderr = run_shell(["pytest", "--tb=no", "-q"], timeout=300)
         output = stdout + stderr
 
-        # Parse pytest output: "X passed, Y failed"
-        match = re.search(r"(\d+) passed", output)
-        passed = int(match.group(1)) if match else 0
+        result = parse_test_output(output, "pytest")
+        if result:
+            return result
 
-        match = re.search(r"(\d+) failed", output)
-        failed = int(match.group(1)) if match else 0
+    # Try RSpec for Ruby projects
+    if Path("Gemfile").exists() and (Path("spec").exists() or Path(".rspec").exists()):
+        code, stdout, stderr = run_shell(["bundle", "exec", "rspec", "--format", "progress"], timeout=300)
+        output = stdout + stderr
 
-        if passed + failed > 0:
-            return TestResult(
-                framework="pytest",
-                total=passed + failed,
-                passed=passed,
-                failed=failed,
-                skipped=0,
-                output=output[:3000]
-            )
+        result = parse_test_output(output, "rspec")
+        if result:
+            return result
+
+    # Try Go tests
+    if Path("go.mod").exists():
+        code, stdout, stderr = run_shell(["go", "test", "./...", "-v"], timeout=300)
+        output = stdout + stderr
+
+        result = parse_test_output(output, "go")
+        if result:
+            return result
 
     return None
 

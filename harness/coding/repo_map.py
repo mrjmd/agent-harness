@@ -34,20 +34,54 @@ CODE_PATTERNS = [
 # Patterns file for brownfield projects
 PATTERNS_PATH = Path("specs/context/patterns.md")
 
-# Directories to exclude
+# Directories to exclude (expanded for brownfield projects)
 EXCLUDE_DIRS = {
+    # Node/JS
     "node_modules",
-    ".git",
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+    # Build outputs
     "dist",
     "build",
+    "out",
     ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    # Turbo/monorepo
+    ".turbo",
+    # Python
     "__pycache__",
     ".pytest_cache",
-    "coverage",
+    ".mypy_cache",
+    ".ruff_cache",
     ".venv",
     "venv",
+    "env",
+    ".tox",
+    "htmlcov",
+    # Ruby
+    "vendor/bundle",
+    ".bundle",
+    # General
+    ".git",
+    ".hg",
+    ".svn",
+    "coverage",
+    ".nyc_output",
+    # Test artifacts
     "playwright-report",
     "test-results",
+    "cypress/videos",
+    "cypress/screenshots",
+    # IDE/Editor
+    ".idea",
+    ".vscode",
+    # Temp
+    "tmp",
+    ".tmp",
+    ".cache",
 }
 
 

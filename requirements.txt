@@ -1,0 +1,25 @@
+# Agent Harness Python Dependencies
+# Requires Python 3.9+
+
+# No external dependencies required!
+# The harness uses only Python standard library modules:
+# - subprocess (shell commands)
+# - json (data handling)
+# - pathlib (file operations)
+# - dataclasses (data structures)
+# - re (regex)
+# - datetime (timestamps)
+# - typing (type hints)
+# - argparse (CLI arguments)
+# - os/sys (system operations)
+# - collections (data structures)
+# - fnmatch (glob patterns)
+# - shlex (shell parsing)
+
+# All LLM calls go through the Claude CLI (claude command)
+# which must be installed separately:
+#   npm install -g @anthropic-ai/claude-code
+
+# Optional development dependencies (for testing harness itself):
+# pytest>=7.0.0
+# pytest-cov>=4.0.0

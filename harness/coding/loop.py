@@ -42,12 +42,13 @@ from git_utils import (
     create_checkpoint,
     commit_feature,
     rollback,
-    ensure_repo
+    ensure_repo,
+    RollbackError
 )
 from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
 from docs import maybe_generate_doc
-from review import enforce_patterns, PatternViolation, get_modified_files
+from review import enforce_patterns, PatternViolation, get_modified_files, validate_file_scope, FileScopeViolation
 from checkpoint import (
     run_checkpoint_review,
     handle_interrupt_options,
@@ -76,13 +77,27 @@ except ImportError:
     MEMORY_AVAILABLE = False
 
 
-# Configuration
+# Configuration - values can be overridden via environment variables
 FEATURES_PATH = Path("specs/features.json")
 CLAUDE_MD_PATH = Path(".claude/CLAUDE.md")
 CONFIG_PATH = Path(".claude/config.json")
-MAX_RETRIES_PER_FEATURE = 5
-MAX_ITERATIONS_PER_FEATURE = 20
-DEFAULT_CHECKPOINT_CADENCE = 5  # Checkpoint every N features
+
+# Configuration with environment variable overrides
+import os
+
+def _get_config_int(env_var: str, default: int) -> int:
+    """Get config value from env var or return default."""
+    val = os.environ.get(env_var)
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return default
+
+MAX_RETRIES_PER_FEATURE = _get_config_int("HARNESS_MAX_RETRIES", 5)
+MAX_ITERATIONS_PER_FEATURE = _get_config_int("HARNESS_MAX_ITERATIONS", 20)
+DEFAULT_CHECKPOINT_CADENCE = _get_config_int("HARNESS_CHECKPOINT_CADENCE", 5)
 
 
 class LoopMode(Enum):
@@ -696,10 +711,33 @@ def run_feature_loop(session: FeatureSession) -> bool:
                 if verification.passed:
                     print("✓ Feature test passes!")
 
+                    # Check file scope restrictions before pattern compliance
+                    print("Checking file scope restrictions...")
+                    try:
+                        modified_files = get_modified_files()
+                        validate_file_scope(modified_files, feature)
+                        print("✓ File scope OK")
+                    except FileScopeViolation as e:
+                        print(f"✗ File scope violation: {e}")
+                        current_feedback = f"""Your changes violate file scope restrictions:
+
+{e}
+
+The feature specifies which files you are allowed to create, modify, and which are forbidden.
+You MUST revert changes to forbidden files and limit modifications to allowed files only.
+
+Check the feature's 'file_scope' in specs/features.json for the exact restrictions."""
+                        session.conversation_history.append({
+                            "type": "feedback",
+                            "content": current_feedback
+                        })
+                        record.error = f"File scope violation: {str(e)[:200]}"
+                        session.iterations.append(record)
+                        continue  # Let agent fix it
+
                     # Check pattern compliance before proceeding
                     print("Checking pattern compliance...")
                     try:
-                        modified_files = get_modified_files()
                         enforce_patterns(modified_files)
                         print("✓ Pattern compliance OK")
                     except PatternViolation as e:
@@ -867,17 +905,19 @@ def run_feature_with_checkpoints(feature: dict) -> tuple[bool, bool]:
     try:
         success = run_feature_loop(session)
 
+        # Build iteration history for reflection (used in both success and failure)
+        iteration_history = [
+            {
+                "error": r.error,
+                "response_summary": r.response_summary,
+                "verification_result": r.verification_result
+            }
+            for r in session.iterations
+        ]
+
         if success:
             # Run reflection to extract lessons
             print("\nRunning reflection...")
-            iteration_history = [
-                {
-                    "error": r.error,
-                    "response_summary": r.response_summary,
-                    "verification_result": r.verification_result
-                }
-                for r in session.iterations
-            ]
             learnings = run_reflection(feature, iteration_history)
             if learnings:
                 save_learnings(learnings)
@@ -891,14 +931,31 @@ def run_feature_with_checkpoints(feature: dict) -> tuple[bool, bool]:
 
             return True, False
         else:
+            # Run reflection on failure too - valuable lessons from what went wrong
+            if len(session.iterations) >= 2:  # Only if we had multiple attempts
+                print("\nRunning reflection on failure (lessons from what went wrong)...")
+                learnings = run_reflection(feature, iteration_history, failed=True)
+                if learnings:
+                    save_learnings(learnings)
+                    print(f"Extracted {len(learnings)} lessons from failed attempts")
+
             # Rollback on failure
             print("\nRolling back changes...")
-            rollback()
+            try:
+                rollback(strict=True)
+            except RollbackError as e:
+                print(f"CRITICAL: Rollback failed! {e}")
+                print("Manual intervention required. Working directory is dirty.")
+                # Re-raise to halt the loop - dirty state is dangerous
+                raise
             return False, session.last_failure_was_infrastructure
 
     except KeyboardInterrupt:
         print("\n\nInterrupted. Rolling back...")
-        rollback()
+        try:
+            rollback(strict=False)  # Best effort on interrupt
+        except RollbackError:
+            print("Warning: Rollback failed on interrupt. Working directory may be dirty.")
         raise
 
 
@@ -962,7 +1019,25 @@ def main():
     print(f"Checkpoint cadence: every {cadence} features")
     print("=" * 60)
 
-    # Verify Claude CLI is available
+    # Pre-flight dependency checks
+    print("\nPre-flight checks...")
+    preflight_failed = False
+
+    # 1. Check git is available
+    try:
+        subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            check=True,
+            timeout=10
+        )
+        print("  ✓ git")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        print("  ✗ git - not found or not working")
+        print("    Install git: https://git-scm.com/downloads")
+        preflight_failed = True
+
+    # 2. Check Claude CLI is available
     try:
         subprocess.run(
             ["claude", "--version"],
@@ -970,10 +1045,77 @@ def main():
             check=True,
             timeout=10
         )
+        print("  ✓ claude CLI")
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        print("ERROR: 'claude' CLI not found or not working.")
-        print("Install it: npm install -g @anthropic-ai/claude-code")
+        print("  ✗ claude CLI - not found or not working")
+        print("    Install it: npm install -g @anthropic-ai/claude-code")
+        preflight_failed = True
+
+    # 3. Check test runner is available (based on config)
+    config_path = Path(".claude/config.json")
+    test_cmd = ["npx", "playwright", "test"]  # default
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            test_cmd_str = config.get("settings", {}).get("testCommand", "npx playwright test")
+            import shlex
+            test_cmd = shlex.split(test_cmd_str)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check if the test runner exists (just the command, not running tests)
+    test_runner = test_cmd[0]
+    try:
+        # For npx commands, check that npm/npx exists
+        if test_runner == "npx":
+            subprocess.run(
+                ["npx", "--version"],
+                capture_output=True,
+                check=True,
+                timeout=10
+            )
+        elif test_runner == "pytest":
+            subprocess.run(
+                ["pytest", "--version"],
+                capture_output=True,
+                check=True,
+                timeout=10
+            )
+        else:
+            subprocess.run(
+                [test_runner, "--version"],
+                capture_output=True,
+                timeout=10
+            )
+        print(f"  ✓ test runner ({test_runner})")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        print(f"  ✗ test runner ({test_runner}) - not found")
+        if test_runner == "npx":
+            print("    Install Node.js: https://nodejs.org/")
+            print("    Then run: npm install (to install dependencies)")
+        elif test_runner == "pytest":
+            print("    Install pytest: pip install pytest")
+        preflight_failed = True
+
+    # 4. Check Python 3 is available (harness scripts need it)
+    try:
+        subprocess.run(
+            ["python3", "--version"],
+            capture_output=True,
+            check=True,
+            timeout=10
+        )
+        print("  ✓ python3")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        print("  ✗ python3 - not found")
+        print("    Install Python 3.9+: https://www.python.org/downloads/")
+        preflight_failed = True
+
+    if preflight_failed:
+        print("\nERROR: Pre-flight checks failed. Please install missing dependencies.")
         return 1
+
+    print("  All pre-flight checks passed.\n")
 
     # Ensure git repo exists
     if not ensure_repo():

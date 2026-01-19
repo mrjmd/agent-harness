@@ -135,7 +135,24 @@ for pattern in "${IGNORES[@]}"; do
 done
 log_success "Updated .gitignore"
 
-# Check for package.json, create if missing
+# Harness scripts to inject
+HARNESS_SCRIPTS='
+{
+  "doctor": "python3 harness/doctor.py",
+  "doctor:diagnose": "python3 harness/doctor.py diagnose",
+  "doctor:stabilize": "python3 harness/doctor.py stabilize",
+  "doctor:baseline": "python3 harness/doctor.py baseline",
+  "doctor:fixtures": "python3 harness/doctor.py fixtures",
+  "doctor:qa": "python3 harness/doctor.py qa",
+  "doctor:solidify": "python3 harness/doctor.py solidify",
+  "spec": "python3 harness/architect.py",
+  "spec:new": "python3 harness/architect.py new",
+  "spec:resume": "python3 harness/architect.py resume",
+  "spec:audit": "python3 harness/architect.py audit",
+  "agent:loop": "python3 harness/coding/loop.py"
+}'
+
+# Check for package.json, create if missing OR merge scripts into existing
 if [[ ! -f "package.json" ]]; then
     log_info "Creating package.json..."
     cat > package.json << 'EOF'
@@ -164,6 +181,83 @@ if [[ ! -f "package.json" ]]; then
 }
 EOF
     log_success "Created package.json"
+else
+    # Brownfield: package.json exists - merge harness scripts without touching dependencies
+    log_info "Merging harness scripts into existing package.json..."
+
+    # Check if jq is available for safe JSON merging
+    if command -v jq &> /dev/null; then
+        # Use jq to safely merge scripts while preserving everything else
+        TEMP_PKG=$(mktemp)
+        jq --argjson harness "$HARNESS_SCRIPTS" '.scripts = (.scripts // {}) + $harness' package.json > "$TEMP_PKG"
+        if [[ $? -eq 0 ]] && [[ -s "$TEMP_PKG" ]]; then
+            mv "$TEMP_PKG" package.json
+            log_success "Merged harness scripts into package.json (using jq)"
+        else
+            rm -f "$TEMP_PKG"
+            log_warn "Failed to merge with jq, using Python fallback..."
+            python3 -c "
+import json
+import sys
+
+harness_scripts = $HARNESS_SCRIPTS
+
+try:
+    with open('package.json', 'r') as f:
+        pkg = json.load(f)
+
+    if 'scripts' not in pkg:
+        pkg['scripts'] = {}
+
+    # Merge harness scripts (don't overwrite existing with same name)
+    for key, val in harness_scripts.items():
+        if key not in pkg['scripts']:
+            pkg['scripts'][key] = val
+        else:
+            # Script already exists, prefix harness version
+            pkg['scripts']['harness:' + key] = val
+
+    with open('package.json', 'w') as f:
+        json.dump(pkg, f, indent=2)
+
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" && log_success "Merged harness scripts into package.json (using Python)"
+        fi
+    else
+        # Use Python for JSON merging (more portable than jq)
+        python3 -c "
+import json
+import sys
+
+harness_scripts = $HARNESS_SCRIPTS
+
+try:
+    with open('package.json', 'r') as f:
+        pkg = json.load(f)
+
+    if 'scripts' not in pkg:
+        pkg['scripts'] = {}
+
+    # Merge harness scripts (don't overwrite existing with same name)
+    for key, val in harness_scripts.items():
+        if key not in pkg['scripts']:
+            pkg['scripts'][key] = val
+        else:
+            # Script already exists, prefix harness version
+            pkg['scripts']['harness:' + key] = val
+
+    with open('package.json', 'w') as f:
+        json.dump(pkg, f, indent=2)
+
+    print('OK')
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" && log_success "Merged harness scripts into package.json (using Python)"
+    fi
 fi
 
 # Install dependencies
@@ -198,6 +292,44 @@ if [[ ! -f "playwright.config.ts" ]]; then
     log_info "Creating Playwright configuration..."
     cat > playwright.config.ts << 'EOF'
 import { defineConfig, devices } from '@playwright/test';
+import { readFileSync, existsSync } from 'fs';
+
+// Load port from config or detect from common patterns
+function getDevPort(): number {
+  // 1. Environment variable takes priority
+  if (process.env.DEV_PORT) {
+    return parseInt(process.env.DEV_PORT, 10);
+  }
+
+  // 2. Try to read from harness config
+  try {
+    if (existsSync('.claude/config.json')) {
+      const config = JSON.parse(readFileSync('.claude/config.json', 'utf-8'));
+      if (config.settings?.devPort) {
+        return config.settings.devPort;
+      }
+    }
+  } catch {}
+
+  // 3. Try to detect from package.json dev script
+  try {
+    if (existsSync('package.json')) {
+      const pkg = JSON.parse(readFileSync('package.json', 'utf-8'));
+      const devScript = pkg.scripts?.dev || '';
+      // Match patterns like --port 8000, -p 3001, PORT=8080
+      const portMatch = devScript.match(/(?:--port|-p)\s*(\d+)|PORT=(\d+)/);
+      if (portMatch) {
+        return parseInt(portMatch[1] || portMatch[2], 10);
+      }
+    }
+  } catch {}
+
+  // 4. Default to 3000
+  return 3000;
+}
+
+const DEV_PORT = getDevPort();
+const DEV_URL = process.env.BASE_URL || `http://localhost:${DEV_PORT}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -207,7 +339,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    baseURL: process.env.BASE_URL || 'http://localhost:3000',
+    baseURL: DEV_URL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -218,8 +350,8 @@ export default defineConfig({
     },
   ],
   webServer: process.env.BASE_URL ? undefined : {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
+    command: process.env.DEV_COMMAND || 'npm run dev',
+    url: DEV_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
   },
