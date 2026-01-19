@@ -52,6 +52,13 @@ try:
 except ImportError:
     MEMORY_AVAILABLE = False
 
+# Documentation Generation
+try:
+    from docs import backfill_docs, cmd_status as docs_status
+    DOCS_AVAILABLE = True
+except ImportError:
+    DOCS_AVAILABLE = False
+
 
 # Paths
 SPECS_DIR = Path("specs")
@@ -2000,6 +2007,8 @@ Examples:
   python harness/architect.py audit
   python harness/architect.py add-feature "Email notifications"
   python harness/architect.py scan
+  python harness/architect.py docs backfill
+  python harness/architect.py docs status
         """
     )
 
@@ -2022,6 +2031,16 @@ Examples:
     # scan command
     subparsers.add_parser("scan", help="Scan existing codebase for patterns")
 
+    # docs command
+    docs_parser = subparsers.add_parser("docs", help="Generate documentation")
+    docs_parser.add_argument(
+        "docs_action",
+        nargs="?",
+        default="status",
+        choices=["backfill", "status"],
+        help="Action: backfill (generate all) or status (show state)"
+    )
+
     args = parser.parse_args()
 
     if args.command == "new":
@@ -2034,6 +2053,15 @@ Examples:
         return cmd_add_feature(args.description)
     elif args.command == "scan":
         return cmd_scan()
+    elif args.command == "docs":
+        if not DOCS_AVAILABLE:
+            print("Error: Documentation module not available")
+            return 1
+        if args.docs_action == "backfill":
+            result = backfill_docs()
+            return 1 if result.get("errors") else 0
+        else:  # status
+            return docs_status()
     else:
         parser.print_help()
         return 0

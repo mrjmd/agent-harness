@@ -46,6 +46,7 @@ from git_utils import (
 )
 from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
+from docs import maybe_generate_doc
 from review import enforce_patterns, PatternViolation, get_modified_files
 from checkpoint import (
     run_checkpoint_review,
@@ -881,6 +882,12 @@ def run_feature_with_checkpoints(feature: dict) -> tuple[bool, bool]:
             if learnings:
                 save_learnings(learnings)
                 print(f"Extracted {len(learnings)} lessons for future agents")
+
+            # Generate documentation for the completed feature
+            print("\nGenerating documentation...")
+            doc_path = maybe_generate_doc(feature)
+            if doc_path:
+                print(f"Documentation saved to {doc_path}")
 
             return True, False
         else:
