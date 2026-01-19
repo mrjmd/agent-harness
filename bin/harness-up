@@ -60,12 +60,14 @@ CORE_FILES=(
     "harness/doctor.py"
     "harness/review_board.py"
     "harness/memory.py"
+    "harness/cli.py"
     "harness/coding/loop.py"
     "harness/coding/verify.py"
     "harness/coding/git_utils.py"
     "harness/coding/repo_map.py"
     "harness/coding/reflection.py"
     "harness/coding/review.py"
+    "harness/coding/checkpoint.py"
     "harness/reviewers/__init__.py"
     "harness/reviewers/base.py"
     "harness/reviewers/gemini.py"
@@ -198,6 +200,7 @@ else
         "$HARNESS_SOURCE/harness/doctor.py" \
         "$HARNESS_SOURCE/harness/review_board.py" \
         "$HARNESS_SOURCE/harness/memory.py" \
+        "$HARNESS_SOURCE/harness/cli.py" \
         ./harness/
 
     # Sync coding loop files
@@ -209,6 +212,7 @@ else
         "$HARNESS_SOURCE/harness/coding/repo_map.py" \
         "$HARNESS_SOURCE/harness/coding/reflection.py" \
         "$HARNESS_SOURCE/harness/coding/review.py" \
+        "$HARNESS_SOURCE/harness/coding/checkpoint.py" \
         ./harness/coding/
 
     # Sync reviewers module

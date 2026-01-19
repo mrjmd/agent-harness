@@ -28,6 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Shared CLI module
+from cli import call_architect as _call_claude_cli
+
 # Review Board (Bicameral Mind)
 try:
     from review_board import should_review, request_review, run_review_loop
@@ -73,35 +76,19 @@ SUMMARY_TRIGGER_COUNT = 25  # Summarize when messages exceed this count
 
 
 # =============================================================================
-# CLI Wrapper
+# CLI Wrapper (uses shared module with streaming + read-only tools)
 # =============================================================================
 
 def call_claude_cli(prompt_text: str) -> str:
     """
-    Call claude CLI with formatted prompt.
+    Call claude CLI with streaming output and read-only tool access.
 
-    Uses --print for non-interactive mode and --dangerously-skip-permissions
-    to avoid permission prompts.
+    Uses the shared CLI module which provides:
+    - Streaming output for real-time feedback
+    - Read-only tools (Read, Glob, Grep, WebFetch, WebSearch)
+    - 10 minute timeout
     """
-    try:
-        result = subprocess.run(
-            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=300  # 5 minute timeout
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Claude CLI error: {e.stderr}")
-        raise
-    except subprocess.TimeoutExpired:
-        print("Claude CLI timed out after 5 minutes")
-        raise
-    except FileNotFoundError:
-        print("ERROR: 'claude' CLI not found. Install it first.")
-        print("See: https://github.com/anthropics/claude-cli")
-        sys.exit(1)
+    return _call_claude_cli(prompt_text)
 
 
 # XML-style delimiters for injection protection
@@ -1504,16 +1491,15 @@ Please address this feedback and update the features JSON."""
         prompt = format_conversation(full_system, state.messages, user_input)
 
         try:
-            # Call Claude CLI
-            print("\n(Thinking...)")
+            # Call Claude CLI (streams output in real-time)
+            print()  # Start streaming on new line
             assistant_message = call_claude_cli(prompt)
 
             # Add to history
             state.messages.append({"role": "user", "content": user_input})
             state.messages.append({"role": "assistant", "content": assistant_message})
 
-            # Print response
-            print(f"\nArchitect: {assistant_message}")
+            # Response already streamed above, no need to print again
 
             # Extract questions for Q&A tracking
             if MEMORY_AVAILABLE:

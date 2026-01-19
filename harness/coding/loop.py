@@ -15,15 +15,20 @@ The key insight: Claude CLI executes tools internally, but verification
 is external - the harness runs tests to catch hallucinations.
 """
 
+import argparse
 import json
-import select
+import signal
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
+
+# Shared CLI module (add parent to path for import)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from cli import call_implementer as _call_claude_cli
 
 # Local modules
 from verify import (
@@ -42,6 +47,14 @@ from git_utils import (
 from repo_map import build_feature_context
 from reflection import run_reflection, save_learnings
 from review import enforce_patterns, PatternViolation, get_modified_files
+from checkpoint import (
+    run_checkpoint_review,
+    handle_interrupt_options,
+    save_checkpoint_history,
+    generate_fix_features,
+    extract_critical_issues,
+    CheckpointRecord,
+)
 
 # Review Board (Bicameral Mind)
 try:
@@ -65,8 +78,16 @@ except ImportError:
 # Configuration
 FEATURES_PATH = Path("specs/features.json")
 CLAUDE_MD_PATH = Path(".claude/CLAUDE.md")
+CONFIG_PATH = Path(".claude/config.json")
 MAX_RETRIES_PER_FEATURE = 5
 MAX_ITERATIONS_PER_FEATURE = 20
+DEFAULT_CHECKPOINT_CADENCE = 5  # Checkpoint every N features
+
+
+class LoopMode(Enum):
+    """Operating mode for the main loop."""
+    INTERACTIVE = "interactive"
+    AUTONOMOUS = "autonomous"
 
 # XML-style delimiters for prompt injection protection
 XML_DELIMITERS = {
@@ -111,110 +132,304 @@ class FeatureSession:
     conversation_history: list = field(default_factory=list)
     iterations: list = field(default_factory=list)
     checkpoint: str = ""
+    last_failure_was_infrastructure: bool = False  # Track if failure was due to infra issues
+
+
+@dataclass
+class CheckpointState:
+    """Track progress for cadence-based checkpointing."""
+    features_at_last_checkpoint: int = 0
+    checkpoint_count: int = 0
+    interrupt_requested: bool = False  # Set by signal handler
+    mode: LoopMode = LoopMode.INTERACTIVE
+
+
+def create_signal_handler(state: CheckpointState):
+    """
+    Create signal handler that requests graceful interrupt.
+
+    First Ctrl+C: Set interrupt flag, finish current feature then pause
+    Second Ctrl+C: Force immediate stop (raise KeyboardInterrupt)
+    """
+    interrupt_count = [0]  # Use list for mutable closure
+
+    def handler(signum, frame):
+        interrupt_count[0] += 1
+
+        if interrupt_count[0] == 1:
+            print("\n[Interrupt] Will pause after current feature...")
+            state.interrupt_requested = True
+        else:
+            print("\n[Interrupt] Forcing immediate stop...")
+            raise KeyboardInterrupt()
+
+    return handler
+
+
+def load_cadence_config() -> dict:
+    """Load cadence configuration from .claude/config.json."""
+    if CONFIG_PATH.exists():
+        try:
+            config = json.loads(CONFIG_PATH.read_text())
+            return config.get("cadence", {})
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def get_cadence() -> int:
+    """Get checkpoint cadence (features per checkpoint)."""
+    config = load_cadence_config()
+    return config.get("featuresPerCheckpoint", DEFAULT_CHECKPOINT_CADENCE)
+
+
+def get_passing_count(features: list[dict]) -> int:
+    """Count features with status 'passing'."""
+    return len([f for f in features if f.get("status") == "passing"])
+
+
+def get_progress_stats(features: list[dict]) -> dict:
+    """Get progress statistics for the feature backlog."""
+    total = len(features)
+    passing = len([f for f in features if f.get("status") == "passing"])
+    failing = len([f for f in features if f.get("status") == "failing"])
+    blocked = len([f for f in features if f.get("blocked")])
+    in_progress = len([f for f in features if f.get("status") == "in_progress"])
+    todo = len([f for f in features if f.get("status") == "todo"])
+
+    return {
+        "total": total,
+        "passing": passing,
+        "failing": failing,
+        "blocked": blocked,
+        "in_progress": in_progress,
+        "todo": todo,
+    }
+
+
+def should_checkpoint(features: list[dict], state: CheckpointState, cadence: int) -> bool:
+    """
+    Check if we've hit a cadence checkpoint.
+
+    Returns True if:
+    - Number of passing features since last checkpoint >= cadence
+    - OR interrupt was requested (Ctrl+C)
+    """
+    passing = get_passing_count(features)
+    since_last = passing - state.features_at_last_checkpoint
+    return since_last >= cadence or state.interrupt_requested
+
+
+def handle_interactive_checkpoint(result, state: CheckpointState, features: list[dict]) -> Optional[list[dict]]:
+    """
+    Handle checkpoint in interactive mode - pause and prompt.
+
+    Returns:
+        List of new fix features to insert, or None if user wants to stop
+    """
+    from datetime import datetime, timezone
+
+    print("\n--- Review Results ---")
+    print(result.feedback[:2000] if result.feedback else "No issues found.")
+
+    stats = get_progress_stats(features)
+
+    if result.approved:
+        print("\n[APPROVED] Backlog looks healthy.")
+        try:
+            choice = input("\n[C]ontinue, [S]top? ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if choice == "s":
+            return None  # Signal to stop
+    else:
+        print("\n[ISSUES FOUND] Review flagged concerns.")
+        print("\nOptions:")
+        print("[1] Generate fix features and continue")
+        print("[2] Continue without fixes (I'll handle manually)")
+        print("[3] Stop and review")
+
+        try:
+            choice = input("\nChoice [1/2/3]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if choice == "1":
+            # Get next priority number
+            max_priority = max((f.get("priority", 0) for f in features), default=0)
+            fix_features = generate_fix_features(result.feedback, max_priority + 1)
+            if fix_features:
+                print(f"\nGenerated {len(fix_features)} fix features:")
+                for f in fix_features:
+                    print(f"  - {f['id']} (priority: {f['priority']})")
+
+            # Save checkpoint record
+            record = CheckpointRecord(
+                number=state.checkpoint_count + 1,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                features_passing=stats["passing"],
+                features_total=stats["total"],
+                review_approved=result.approved,
+                issues_found=extract_critical_issues(result.feedback),
+                fixes_generated=[f["id"] for f in fix_features],
+                was_interrupt=state.interrupt_requested,
+            )
+            save_checkpoint_history(record)
+
+            state.checkpoint_count += 1
+            state.interrupt_requested = False
+            state.features_at_last_checkpoint = stats["passing"]
+            return fix_features
+
+        elif choice == "3":
+            return None  # Signal to stop
+
+    # Save checkpoint record for continue case
+    record = CheckpointRecord(
+        number=state.checkpoint_count + 1,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        features_passing=stats["passing"],
+        features_total=stats["total"],
+        review_approved=result.approved,
+        issues_found=[],
+        fixes_generated=[],
+        was_interrupt=state.interrupt_requested,
+    )
+    save_checkpoint_history(record)
+
+    state.checkpoint_count += 1
+    state.interrupt_requested = False
+    state.features_at_last_checkpoint = stats["passing"]
+    return []  # Continue without new features
+
+
+def handle_autonomous_checkpoint(result, state: CheckpointState, features: list[dict]) -> list[dict]:
+    """
+    Handle checkpoint in autonomous mode - auto-fix critical, log others.
+
+    Returns:
+        List of fix features to insert (always continues, never returns None)
+    """
+    from datetime import datetime, timezone
+
+    stats = get_progress_stats(features)
+
+    if not result.approved:
+        # Parse feedback for critical vs non-critical
+        critical_issues = extract_critical_issues(result.feedback)
+
+        if critical_issues:
+            print(f"\n[CHECKPOINT] {len(critical_issues)} critical issues - generating fixes")
+            max_priority = max((f.get("priority", 0) for f in features), default=0)
+            fix_features = generate_fix_features(result.feedback, max_priority + 1)
+
+            # Save checkpoint record
+            record = CheckpointRecord(
+                number=state.checkpoint_count + 1,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                features_passing=stats["passing"],
+                features_total=stats["total"],
+                review_approved=result.approved,
+                issues_found=critical_issues,
+                fixes_generated=[f["id"] for f in fix_features],
+                was_interrupt=state.interrupt_requested,
+            )
+            save_checkpoint_history(record)
+
+            state.checkpoint_count += 1
+            state.interrupt_requested = False
+            state.features_at_last_checkpoint = stats["passing"]
+            return fix_features
+        else:
+            print("\n[CHECKPOINT] Non-critical issues logged, continuing...")
+    else:
+        print("\n[CHECKPOINT] Review passed, continuing...")
+
+    # Save checkpoint record
+    record = CheckpointRecord(
+        number=state.checkpoint_count + 1,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        features_passing=stats["passing"],
+        features_total=stats["total"],
+        review_approved=result.approved,
+        issues_found=extract_critical_issues(result.feedback) if not result.approved else [],
+        fixes_generated=[],
+        was_interrupt=state.interrupt_requested,
+    )
+    save_checkpoint_history(record)
+
+    state.checkpoint_count += 1
+    state.interrupt_requested = False
+    state.features_at_last_checkpoint = stats["passing"]
+    return []
+
+
+def run_checkpoint(features: list[dict], state: CheckpointState) -> Optional[list[dict]]:
+    """
+    Run holistic checkpoint review.
+
+    Returns:
+        List of new fix features to insert, or None if user wants to stop
+    """
+    stats = get_progress_stats(features)
+
+    print(f"\n{'='*60}")
+    print(f"CHECKPOINT #{state.checkpoint_count + 1}")
+    if state.interrupt_requested:
+        print("(Triggered by interrupt)")
+    print(f"{'='*60}")
+
+    print(f"Progress: {stats['passing']}/{stats['total']} features passing")
+    print(f"Failing: {stats['failing']}, Blocked: {stats['blocked']}")
+
+    # Run backlog review via review_board
+    if REVIEW_BOARD_AVAILABLE:
+        print("\nRunning backlog review...")
+        result = run_checkpoint_review(features)
+
+        if state.mode == LoopMode.INTERACTIVE:
+            return handle_interactive_checkpoint(result, state, features)
+        else:
+            return handle_autonomous_checkpoint(result, state, features)
+
+    # No review board - just log and continue
+    print("\n[CHECKPOINT] Review board not available - continuing...")
+    state.checkpoint_count += 1
+    state.features_at_last_checkpoint = stats["passing"]
+    state.interrupt_requested = False
+    return []
+
+
+def insert_fix_features(data: dict, fix_features: list[dict]) -> None:
+    """Insert fix features into the backlog."""
+    if not fix_features:
+        return
+
+    features = data.get("features", [])
+
+    # Insert fix features
+    for fix in fix_features:
+        features.append(fix)
+
+    # Re-sort by priority
+    data["features"] = sorted(features, key=lambda f: f.get("priority", 999))
+
+    # Save
+    with open(FEATURES_PATH, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def call_claude_cli(prompt_text: str, timeout: int = 1800) -> str:
     """
-    Call claude CLI with streaming output for real-time feedback.
+    Call claude CLI with streaming output and full tool access.
 
-    The CLI will execute with its built-in tools (file editing, etc.)
-    Streams output in real-time so user can see progress.
+    Uses the shared CLI module which provides:
+    - Streaming output for real-time feedback
+    - Full tool access (Edit, Write, Bash, etc.)
+    - Configurable timeout (default 30 min for implementation)
     """
-    try:
-        process = subprocess.Popen(
-            ["claude", "--print", "--output-format", "stream-json",
-             "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
-        # Send prompt via stdin
-        process.stdin.write(prompt_text)
-        process.stdin.close()
-
-        full_response = []
-        final_result = None
-        last_activity = time.time()
-
-        while True:
-            # Check for timeout
-            if time.time() - last_activity > timeout:
-                process.kill()
-                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
-
-            # Read available output
-            ready, _, _ = select.select([process.stdout], [], [], 1.0)
-            if ready:
-                line = process.stdout.readline()
-                if not line:
-                    break
-                last_activity = time.time()
-
-                # Parse streaming JSON and show real-time output
-                try:
-                    data = json.loads(line)
-
-                    # Stream events are wrapped: {"type":"stream_event","event":{...}}
-                    if data.get("type") == "stream_event":
-                        event = data.get("event", {})
-                        if event.get("type") == "content_block_delta":
-                            delta = event.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                text = delta.get("text", "")
-                                full_response.append(text)
-                                # Print actual text as it streams
-                                print(text, end="", flush=True)
-                        elif event.get("type") == "message_stop":
-                            pass  # Continue to get final result
-
-                    # Final result contains the complete response
-                    elif data.get("type") == "result":
-                        final_result = data.get("result", "")
-
-                except json.JSONDecodeError:
-                    pass
-
-            # Check if process ended
-            if process.poll() is not None:
-                break
-
-        print()  # Newline after streaming output
-
-        # Get any remaining output
-        remaining = process.stdout.read()
-        if remaining:
-            for line in remaining.strip().split("\n"):
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if data.get("type") == "stream_event":
-                            event = data.get("event", {})
-                            if event.get("type") == "content_block_delta":
-                                delta = event.get("delta", {})
-                                if delta.get("type") == "text_delta":
-                                    full_response.append(delta.get("text", ""))
-                        elif data.get("type") == "result":
-                            final_result = data.get("result", "")
-                    except json.JSONDecodeError:
-                        pass
-
-        process.wait()
-
-        if process.returncode != 0:
-            stderr = process.stderr.read()
-            raise subprocess.CalledProcessError(process.returncode, "claude", stderr=stderr)
-
-        # Prefer the final result if available, otherwise use streamed content
-        if final_result is not None:
-            return final_result
-        return "".join(full_response)
-
-    except FileNotFoundError:
-        print("ERROR: 'claude' CLI not found.")
-        print("Install it: npm install -g @anthropic-ai/claude-code")
-        sys.exit(1)
+    return _call_claude_cli(prompt_text, timeout=timeout)
 
 
 def format_conversation(context: str, history: list, current_feedback: str = "") -> str:
@@ -576,7 +791,12 @@ Make the necessary changes and ensure they pass verification again."""
                         return True
                     else:
                         # Regression detected - feed back to agent
-                        print(f"✗ Regression detected: {regression.failed_tests}")
+                        if regression.is_infrastructure_failure:
+                            print(f"✗ Regression detected (INFRASTRUCTURE ISSUE): {len(regression.failed_tests)} tests")
+                            session.last_failure_was_infrastructure = True
+                        else:
+                            print(f"✗ Regression detected: {regression.failed_tests}")
+                            session.last_failure_was_infrastructure = False
                         current_feedback = format_regression_feedback(regression, feature_id)
                         session.conversation_history.append({
                             "type": "feedback",
@@ -598,6 +818,21 @@ Make the necessary changes and ensure they pass verification again."""
 
             session.iterations.append(record)
 
+        except subprocess.CalledProcessError as e:
+            # Extract stderr for better debugging
+            stderr_msg = ""
+            if hasattr(e, 'stderr') and e.stderr:
+                stderr_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode('utf-8', errors='replace')
+            print(f"Error in iteration: {e}")
+            if stderr_msg:
+                print(f"  stderr: {stderr_msg[:500]}")
+            session.iterations.append(IterationRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                iteration=iteration,
+                error=f"{e}\nstderr: {stderr_msg[:200]}"
+            ))
+            # Add error as feedback for next iteration
+            current_feedback = f"Error occurred: {e}\nstderr: {stderr_msg}\nPlease try again."
         except Exception as e:
             print(f"Error in iteration: {e}")
             session.iterations.append(IterationRecord(
@@ -612,9 +847,14 @@ Make the necessary changes and ensure they pass verification again."""
     return False
 
 
-def run_feature_with_checkpoints(feature: dict) -> bool:
+def run_feature_with_checkpoints(feature: dict) -> tuple[bool, bool]:
     """
     Run a feature with git checkpoint/rollback support.
+
+    Returns:
+        Tuple of (success: bool, is_infrastructure_failure: bool)
+        - success: True if feature passes all checks
+        - is_infrastructure_failure: True if failure was due to infra issues (not code bugs)
     """
     feature_id = feature.get("id", "unknown")
 
@@ -642,12 +882,12 @@ def run_feature_with_checkpoints(feature: dict) -> bool:
                 save_learnings(learnings)
                 print(f"Extracted {len(learnings)} lessons for future agents")
 
-            return True
+            return True, False
         else:
             # Rollback on failure
             print("\nRolling back changes...")
             rollback()
-            return False
+            return False, session.last_failure_was_infrastructure
 
     except KeyboardInterrupt:
         print("\n\nInterrupted. Rolling back...")
@@ -655,10 +895,64 @@ def run_feature_with_checkpoints(feature: dict) -> bool:
         raise
 
 
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Autonomous Agent Harness - CLI-Native Loop",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python harness/coding/loop.py                    # Auto-detect mode from TTY
+  python harness/coding/loop.py --interactive      # Always pause at checkpoints
+  python harness/coding/loop.py --autonomous       # Never pause, auto-fix critical
+  python harness/coding/loop.py -a                 # Short form for autonomous
+  python harness/coding/loop.py --cadence 3        # Checkpoint every 3 features
+  python harness/coding/loop.py -a --cadence 10    # Autonomous, every 10 features
+        """
+    )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Interactive mode: pause at checkpoints for user input"
+    )
+    mode_group.add_argument(
+        "--autonomous", "-a",
+        action="store_true",
+        help="Autonomous mode: auto-continue, auto-fix critical issues"
+    )
+
+    parser.add_argument(
+        "--cadence", "-c",
+        type=int,
+        default=None,
+        help=f"Checkpoint every N features (default: {DEFAULT_CHECKPOINT_CADENCE})"
+    )
+
+    return parser.parse_args()
+
+
 def main():
     """Main entry point."""
+    args = parse_args()
+
+    # Determine mode
+    if args.interactive:
+        mode = LoopMode.INTERACTIVE
+    elif args.autonomous:
+        mode = LoopMode.AUTONOMOUS
+    else:
+        # Auto-detect from TTY
+        mode = LoopMode.INTERACTIVE if sys.stdin.isatty() else LoopMode.AUTONOMOUS
+
+    # Determine cadence
+    cadence = args.cadence if args.cadence is not None else get_cadence()
+
     print("=" * 60)
     print("AUTONOMOUS AGENT HARNESS - CLI-Native Loop")
+    print(f"Mode: {mode.value.upper()}")
+    print(f"Checkpoint cadence: every {cadence} features")
     print("=" * 60)
 
     # Verify Claude CLI is available
@@ -681,12 +975,41 @@ def main():
 
     print("Claude CLI ready")
 
+    # Initialize checkpoint state
+    checkpoint_state = CheckpointState(mode=mode)
+
+    # Register signal handler for graceful interrupt
+    original_handler = signal.signal(signal.SIGINT, create_signal_handler(checkpoint_state))
+
     try:
         # Main loop
         while True:
             # Reload features each iteration
             data = load_features()
             features = data.get("features", [])
+
+            # === CHECKPOINT CHECK ===
+            if should_checkpoint(features, checkpoint_state, cadence):
+                # Handle interrupt-triggered checkpoint in interactive mode
+                if checkpoint_state.interrupt_requested and mode == LoopMode.INTERACTIVE:
+                    action = handle_interrupt_options()
+                    if action is None:
+                        print("\nStopping at user request.")
+                        return 0
+                    elif action == "continue":
+                        checkpoint_state.interrupt_requested = False
+                        continue
+                    # action == "review" falls through to run checkpoint
+
+                new_features = run_checkpoint(features, checkpoint_state)
+
+                if new_features is None:
+                    print("\nStopping at checkpoint.")
+                    return 0
+                elif new_features:
+                    # Insert fix features into backlog
+                    insert_fix_features(data, new_features)
+                    continue  # Re-evaluate with new features
 
             # Check if all done
             all_passing = all(f.get("status") == "passing" for f in features)
@@ -721,16 +1044,26 @@ def main():
                 update_feature_status(feature["id"], "in_progress")
 
             # Run the feature
-            success = run_feature_with_checkpoints(feature)
+            success, is_infra_failure = run_feature_with_checkpoints(feature)
 
             if success:
                 update_feature_status(feature["id"], "passing")
             else:
-                update_feature_status(feature["id"], "failing", increment_retries=True)
+                # Don't increment retries for infrastructure failures
+                # (server crashes, port conflicts, etc. aren't code bugs)
+                if is_infra_failure:
+                    print("  [Note: Not incrementing retries - infrastructure failure detected]")
+                    update_feature_status(feature["id"], "failing", increment_retries=False)
+                else:
+                    update_feature_status(feature["id"], "failing", increment_retries=True)
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
         return 130
+
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, original_handler)
 
 
 if __name__ == "__main__":

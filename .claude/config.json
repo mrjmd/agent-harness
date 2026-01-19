@@ -32,6 +32,12 @@
     "testCommand": "npx playwright test",
     "testTimeout": 60000
   },
+  "cadence": {
+    "enabled": true,
+    "featuresPerCheckpoint": 5,
+    "checkpointReview": "backlog",
+    "storeHistory": true
+  },
   "reviewBoard": {
     "enabled": false,
     "provider": "manual",

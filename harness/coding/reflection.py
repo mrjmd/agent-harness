@@ -17,6 +17,10 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+# Shared CLI module (add parent to path for import)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from cli import call_reflection as _call_claude_cli
+
 
 LEARNINGS_PATH = Path("specs/learnings.json")
 
@@ -83,26 +87,15 @@ class Learning:
 
 
 def call_claude_cli(prompt_text: str) -> str:
-    """Call claude CLI with formatted prompt."""
-    try:
-        result = subprocess.run(
-            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=300  # 5 minute timeout
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Claude CLI error: {e.stderr}")
-        raise
-    except subprocess.TimeoutExpired:
-        print("Claude CLI timed out after 5 minutes")
-        raise
-    except FileNotFoundError:
-        print("ERROR: 'claude' CLI not found. Install it first.")
-        print("Run: npm install -g @anthropic-ai/claude-code")
-        raise
+    """
+    Call claude CLI with streaming output and read-only tool access.
+
+    Uses the shared CLI module which provides:
+    - Streaming output for real-time feedback
+    - Read-only tools (Read, Glob, Grep)
+    - 5 minute timeout for reflection
+    """
+    return _call_claude_cli(prompt_text)
 
 
 def run_reflection(

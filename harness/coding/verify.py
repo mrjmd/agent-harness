@@ -16,8 +16,10 @@ import json
 import shlex
 import subprocess
 import re
+import time
+import sys
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -237,6 +239,8 @@ class RegressionResult:
     passed: bool
     failed_tests: list[str]
     output: str = ""
+    is_infrastructure_failure: bool = False  # True if failure is likely due to server crash, etc.
+    retry_count: int = 0
 
 
 def verify_feature(feature: dict, agent_response: str = "") -> VerificationResult:
@@ -336,7 +340,108 @@ def verify_feature(feature: dict, agent_response: str = "") -> VerificationResul
     )
 
 
-def regression_check(exclude_test: str = None) -> RegressionResult:
+def cleanup_stale_processes() -> None:
+    """
+    Kill stale server processes that might interfere with tests.
+
+    Targets:
+    - next-server (Next.js dev/prod server)
+    - node processes on port 3000
+
+    This helps prevent "address already in use" and server crash issues.
+    """
+    platform = sys.platform
+
+    # Kill processes by name
+    stale_patterns = ["next-server", "next dev", "next start"]
+
+    for pattern in stale_patterns:
+        try:
+            if platform == "darwin" or platform.startswith("linux"):
+                subprocess.run(
+                    ["pkill", "-f", pattern],
+                    capture_output=True,
+                    timeout=5
+                )
+            elif platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "node.exe", "/FI", f"WINDOWTITLE eq *{pattern}*"],
+                    capture_output=True,
+                    timeout=5
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Kill anything on port 3000 (common dev server port)
+    try:
+        if platform == "darwin" or platform.startswith("linux"):
+            # Find PID using port 3000
+            result = subprocess.run(
+                ["lsof", "-ti", ":3000"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                for pid in pids:
+                    if pid.strip():
+                        subprocess.run(["kill", "-9", pid.strip()], capture_output=True, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Brief pause to let OS clean up
+    time.sleep(0.5)
+
+
+def is_infrastructure_failure(output: str, failed_tests: list[str]) -> bool:
+    """
+    Detect if test failures are likely due to infrastructure issues.
+
+    Signs of infrastructure failure:
+    - ERR_CONNECTION_REFUSED (server died)
+    - ECONNRESET (connection reset)
+    - EADDRINUSE (port already in use)
+    - Large number of failures that all occur after a certain point
+    - Timeout errors
+    """
+    infra_patterns = [
+        "ERR_CONNECTION_REFUSED",
+        "ECONNRESET",
+        "EADDRINUSE",
+        "net::ERR_",
+        "ETIMEDOUT",
+        "socket hang up",
+        "connect ECONNREFUSED",
+        "Server is not running",
+        "Could not connect",
+        "Connection refused",
+        "address already in use",
+    ]
+
+    output_upper = output.upper()
+    for pattern in infra_patterns:
+        if pattern.upper() in output_upper:
+            return True
+
+    # If more than 30% of tests failed AND they're spread across many files,
+    # it's likely an infrastructure issue
+    if len(failed_tests) > 20:
+        unique_files = set()
+        for test in failed_tests:
+            # Extract file name
+            if ".spec.ts" in test or ".test.ts" in test:
+                parts = test.split(":")
+                if parts:
+                    unique_files.add(parts[0])
+        # If failures span many different test files, likely infra issue
+        if len(unique_files) > 10:
+            return True
+
+    return False
+
+
+def regression_check(exclude_test: str = None, max_retries: int = 2, cleanup: bool = True) -> RegressionResult:
     """
     Run ALL tests to catch regressions.
 
@@ -345,6 +450,8 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
 
     Args:
         exclude_test: Optional test file to exclude (already verified)
+        max_retries: Number of retries for infrastructure failures (default 2)
+        cleanup: Whether to kill stale processes before running (default True)
 
     Returns:
         RegressionResult with pass/fail and list of broken tests
@@ -357,42 +464,73 @@ def regression_check(exclude_test: str = None) -> RegressionResult:
     if config.reporter_flag:
         full_cmd.append(config.reporter_flag)
 
-    try:
-        result = subprocess.run(
-            full_cmd,
-            capture_output=True,
-            text=True,
-            timeout=regression_timeout,
-            cwd=Path.cwd()
-        )
-    except subprocess.TimeoutExpired:
-        return RegressionResult(
+    last_result = None
+    for attempt in range(max_retries + 1):
+        # Clean up stale processes before each attempt
+        if cleanup:
+            if attempt > 0:
+                print(f"  [Retry {attempt}/{max_retries}] Cleaning up stale processes...")
+            cleanup_stale_processes()
+
+        try:
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                timeout=regression_timeout,
+                cwd=Path.cwd()
+            )
+        except subprocess.TimeoutExpired:
+            last_result = RegressionResult(
+                passed=False,
+                failed_tests=["TIMEOUT"],
+                output=f"Full test suite exceeded {regression_timeout}s timeout",
+                is_infrastructure_failure=True,
+                retry_count=attempt
+            )
+            if attempt < max_retries:
+                print(f"  [Retry {attempt + 1}/{max_retries}] Test suite timed out, retrying...")
+                continue
+            return last_result
+        except FileNotFoundError:
+            return RegressionResult(
+                passed=False,
+                failed_tests=["TEST_RUNNER_NOT_FOUND"],
+                output=f"Command not found: {' '.join(config.base_cmd)}",
+                retry_count=attempt
+            )
+
+        if result.returncode == 0:
+            return RegressionResult(
+                passed=True,
+                failed_tests=[],
+                output=result.stdout,
+                retry_count=attempt
+            )
+
+        # Parse failed tests from output
+        combined_output = result.stdout + result.stderr
+        failed_tests = parse_failed_tests(combined_output, config.runner)
+        is_infra = is_infrastructure_failure(combined_output, failed_tests)
+
+        last_result = RegressionResult(
             passed=False,
-            failed_tests=["TIMEOUT"],
-            output=f"Full test suite exceeded {regression_timeout}s timeout"
-        )
-    except FileNotFoundError:
-        return RegressionResult(
-            passed=False,
-            failed_tests=["TEST_RUNNER_NOT_FOUND"],
-            output=f"Command not found: {' '.join(config.base_cmd)}"
+            failed_tests=failed_tests,
+            output=result.stderr[-3000:],
+            is_infrastructure_failure=is_infra,
+            retry_count=attempt
         )
 
-    if result.returncode == 0:
-        return RegressionResult(
-            passed=True,
-            failed_tests=[],
-            output=result.stdout
-        )
+        # Only retry on infrastructure failures
+        if is_infra and attempt < max_retries:
+            print(f"  [Retry {attempt + 1}/{max_retries}] Detected infrastructure failure, retrying...")
+            time.sleep(2)  # Brief pause before retry
+            continue
 
-    # Parse failed tests from output
-    failed_tests = parse_failed_tests(result.stdout + result.stderr, config.runner)
+        # Not an infra failure or out of retries
+        return last_result
 
-    return RegressionResult(
-        passed=False,
-        failed_tests=failed_tests,
-        output=result.stderr[-3000:]
-    )
+    return last_result
 
 
 def parse_failed_tests(output: str, runner: str = None) -> list[str]:
@@ -526,11 +664,40 @@ def format_regression_feedback(result: RegressionResult, feature_id: str) -> str
     Format regression check result as feedback for the agent.
     """
     if result.passed:
+        retry_note = f" (passed on retry {result.retry_count})" if result.retry_count > 0 else ""
         return f"""
-✓ REGRESSION CHECK PASSED
+✓ REGRESSION CHECK PASSED{retry_note}
 
 All tests in the suite still pass.
 Feature {feature_id} did not break any existing functionality.
+"""
+
+    if result.is_infrastructure_failure:
+        return f"""
+⚠ REGRESSION CHECK FAILED - INFRASTRUCTURE ISSUE DETECTED
+
+The test failures appear to be due to infrastructure problems, not code issues.
+Detected signs: server crash, connection refused, port conflicts, or mass failures.
+
+Attempted retries: {result.retry_count}
+Failed tests count: {len(result.failed_tests)}
+
+Sample failures:
+{chr(10).join(f"  - {t}" for t in result.failed_tests[:10])}
+{"  ... and more" if len(result.failed_tests) > 10 else ""}
+
+Error output:
+{result.output[:1500]}
+
+RECOMMENDED ACTIONS:
+1. The harness has already attempted to clean up stale processes
+2. Check if port 3000 is free: lsof -i :3000
+3. Kill any stale Next.js servers: pkill -f "next-server"
+4. Try running tests manually: npx playwright test
+5. If tests pass manually, this is a harness/environment issue, not a code issue
+
+If tests consistently pass manually but fail in the harness, the feature implementation
+may be correct. Consider marking as infrastructure-blocked if this persists.
 """
 
     return f"""

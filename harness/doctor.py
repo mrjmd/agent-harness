@@ -28,6 +28,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+# Shared CLI module
+from cli import call_doctor as _call_claude_cli
+
 # Working Memory
 try:
     from memory import (
@@ -303,27 +306,28 @@ class HealthReport:
 
 
 # =============================================================================
-# CLI Wrapper
+# CLI Wrapper (uses shared module with streaming + read-only tools)
 # =============================================================================
 
 def call_claude_cli(prompt_text: str, timeout: int = 120) -> str:
-    """Call claude CLI for analysis tasks."""
+    """
+    Call claude CLI with streaming output and read-only tool access.
+
+    Uses the shared CLI module which provides:
+    - Streaming output for real-time feedback
+    - Read-only tools (Read, Glob, Grep)
+    - Configurable timeout (default 2 min for analysis)
+    """
     try:
-        result = subprocess.run(
-            ["claude", "--print", prompt_text, "--dangerously-skip-permissions"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout
-        )
-        return result.stdout.strip()
+        return _call_claude_cli(prompt_text, timeout=timeout)
     except subprocess.CalledProcessError as e:
-        print(f"Claude CLI error: {e.stderr}")
+        print(f"Claude CLI error: {e.stderr if hasattr(e, 'stderr') else str(e)}")
         return ""
     except subprocess.TimeoutExpired:
         print(f"Claude CLI timed out after {timeout}s")
         return ""
-    except FileNotFoundError:
+    except SystemExit:
+        # Shared module calls sys.exit on FileNotFoundError
         print("Warning: 'claude' CLI not found, skipping AI analysis")
         return ""
 
