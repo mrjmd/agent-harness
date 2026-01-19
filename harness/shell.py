@@ -204,6 +204,11 @@ Instructions:
         if not user_input:
             return True
 
+        # Handle common exit commands without slash
+        if user_input.lower() in ("quit", "exit", "q"):
+            print("Goodbye!")
+            return False
+
         # Check for slash command
         if user_input.startswith("/"):
             result = handle_slash_command(user_input)
