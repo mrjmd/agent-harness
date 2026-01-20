@@ -59,12 +59,28 @@ try:
 except ImportError:
     DOCS_AVAILABLE = False
 
+# Codebase Understanding Engine
+try:
+    from understanding import (
+        extract_codebase_understanding,
+        get_understanding_context_for_gate,
+        CodebaseUnderstanding,
+        CONFIDENCE_THRESHOLDS,
+    )
+    UNDERSTANDING_AVAILABLE = True
+except ImportError:
+    UNDERSTANDING_AVAILABLE = False
+    CodebaseUnderstanding = None
+    CONFIDENCE_THRESHOLDS = {"skip_gate": 0.8, "assist_gate": 0.5, "full_gate": 0.0}
+
 
 # Paths
 SPECS_DIR = Path("specs")
 SESSION_PATH = SPECS_DIR / "session.json"
 FEATURES_PATH = SPECS_DIR / "features.json"
 HEALTH_REPORT_PATH = SPECS_DIR / "health_report.md"
+KNOWN_ISSUES_PATH = SPECS_DIR / "known_issues.json"
+UNDERSTANDING_PATH = SPECS_DIR / "codebase_understanding.json"
 
 # Gate document paths (enforced naming convention)
 GATE_1_PATH = SPECS_DIR / "gate-1-problem-discovery.md"
@@ -278,6 +294,109 @@ class SpecificationState:
     created_at: str = ""
     last_updated: str = ""
     product_idea: str = ""
+
+    # Brownfield understanding (for adaptive gates)
+    has_understanding: bool = False
+    understanding_validated: bool = False
+
+
+@dataclass
+class ProjectState:
+    """Represents the current state of a project for workflow selection."""
+    has_codebase: bool = False  # Existing src/ or similar
+    has_session: bool = False  # specs/session.json exists
+    has_features: bool = False  # specs/features.json with features
+    has_tech_plan: bool = False  # specs/gate-3-tech-plan.md exists
+    has_health_report: bool = False  # specs/health_report.md exists
+    has_understanding: bool = False  # specs/codebase_understanding.json exists
+    features_count: int = 0
+    features_status: dict = field(default_factory=dict)  # {"passing": 5, "todo": 2, ...}
+
+
+def detect_project_state() -> ProjectState:
+    """
+    Analyze what already exists to determine best workflow.
+
+    This helps the architect decide whether to:
+    - Start fresh (greenfield)
+    - Run phase 0 (brownfield with no spec)
+    - Resume existing session
+    - Add features (spec exists)
+    - Continue from tech plan
+    """
+    state = ProjectState()
+
+    # Check for existing codebase
+    codebase_indicators = [
+        "src", "app", "lib", "pages", "components",
+        "package.json", "requirements.txt", "pyproject.toml", "go.mod"
+    ]
+    state.has_codebase = any(Path(ind).exists() for ind in codebase_indicators)
+
+    # Check for session
+    state.has_session = SESSION_PATH.exists()
+
+    # Check for tech plan
+    state.has_tech_plan = TECH_PLAN_PATH.exists()
+
+    # Check for health report
+    state.has_health_report = HEALTH_REPORT_PATH.exists()
+
+    # Check for understanding
+    state.has_understanding = UNDERSTANDING_PATH.exists()
+
+    # Check for features
+    if FEATURES_PATH.exists():
+        try:
+            data = json.loads(FEATURES_PATH.read_text())
+            features = []
+            if isinstance(data, dict) and "features" in data:
+                features = [f for f in data["features"] if f.get("id") != "example-001"]
+            elif isinstance(data, list):
+                features = data
+
+            if features:
+                state.has_features = True
+                state.features_count = len(features)
+
+                # Analyze feature status
+                status_counts = {}
+                for f in features:
+                    status = f.get("status", "unknown")
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                state.features_status = status_counts
+
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    return state
+
+
+def select_workflow(state: ProjectState) -> str:
+    """
+    Select the appropriate workflow based on project state.
+
+    Returns one of:
+    - "greenfield": Fresh start, no existing code
+    - "brownfield_fresh": Existing code, no spec
+    - "resume_session": Existing session to continue
+    - "add_feature": Has spec, ready to add features (default for mature projects)
+    - "continue_from_tech": Has tech plan but no features
+    """
+    if state.has_session:
+        return "resume_session"
+
+    if state.has_features and state.has_tech_plan:
+        # Mature project - default to add-feature mode
+        return "add_feature"
+
+    if state.has_tech_plan and not state.has_features:
+        return "continue_from_tech"
+
+    if state.has_codebase:
+        return "brownfield_fresh"
+
+    return "greenfield"
 
 
 def load_state() -> Optional[SpecificationState]:
@@ -1211,6 +1330,154 @@ def extract_state_updates(response: str, state: SpecificationState) -> None:
 # REPL Loop
 # =============================================================================
 
+def load_existing_context(state: SpecificationState) -> str:
+    """
+    Load existing context from spec files for jumping into middle gates.
+
+    When specs already exist (tech_plan, features, patterns), we can skip
+    Gates 1-3 and jump directly to feature addition.
+
+    Returns:
+        Context string for prompt injection
+    """
+    context_parts = []
+
+    # Load tech plan
+    if TECH_PLAN_PATH.exists():
+        try:
+            tech_plan = TECH_PLAN_PATH.read_text()
+            # Extract key sections
+            context_parts.append("## Technical Architecture (from existing spec)")
+            # Take first 2000 chars or up to first major section
+            if len(tech_plan) > 2000:
+                tech_plan = tech_plan[:2000] + "\n...(truncated)"
+            context_parts.append(tech_plan)
+            context_parts.append("")
+            state.tech_plan_generated = True
+        except IOError:
+            pass
+
+    # Load product spec if exists
+    product_spec_path = SPECS_DIR / "product_spec.md"
+    if product_spec_path.exists():
+        try:
+            content = product_spec_path.read_text()[:1500]
+            context_parts.append("## Product Specification")
+            context_parts.append(content)
+            context_parts.append("")
+        except IOError:
+            pass
+
+    # Load understanding summary
+    if UNDERSTANDING_PATH.exists():
+        try:
+            data = json.loads(UNDERSTANDING_PATH.read_text())
+            context_parts.append("## Codebase Understanding")
+            if data.get("inferred_problem"):
+                context_parts.append(f"**Problem:** {data['inferred_problem']}")
+            if data.get("inferred_approach"):
+                context_parts.append(f"**Approach:** {data['inferred_approach']}")
+            if data.get("detected_stack"):
+                stack_str = ", ".join(f"{k}: {v}" for k, v in data["detected_stack"].items())
+                context_parts.append(f"**Stack:** {stack_str}")
+            context_parts.append("")
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load existing features summary
+    if FEATURES_PATH.exists():
+        try:
+            data = json.loads(FEATURES_PATH.read_text())
+            features = []
+            if isinstance(data, dict) and "features" in data:
+                features = [f for f in data["features"] if f.get("id") != "example-001"]
+            elif isinstance(data, list):
+                features = data
+
+            if features:
+                context_parts.append("## Existing Features")
+                for f in features[:10]:
+                    status = f.get("status", "todo")
+                    context_parts.append(f"- [{status}] {f.get('id')}: {f.get('description', '')[:60]}...")
+                if len(features) > 10:
+                    context_parts.append(f"  ... and {len(features) - 10} more")
+                context_parts.append("")
+
+                # Also update state
+                state.features = features
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load known issues summary
+    if KNOWN_ISSUES_PATH.exists():
+        issues_context = _format_known_issues_for_architect()
+        if issues_context:
+            context_parts.append(issues_context)
+
+    return "\n".join(context_parts)
+
+
+def _load_understanding() -> Optional["CodebaseUnderstanding"]:
+    """Load codebase understanding if available."""
+    if not UNDERSTANDING_AVAILABLE:
+        return None
+    if not UNDERSTANDING_PATH.exists():
+        return None
+    try:
+        return CodebaseUnderstanding.load()
+    except Exception:
+        return None
+
+
+def _adapt_gate_prompt(gate_name: str, understanding: Optional["CodebaseUnderstanding"]) -> str:
+    """
+    Adapt a gate prompt based on codebase understanding.
+
+    For brownfield projects with high-confidence understanding, we modify
+    the gate prompt to validate inferences rather than ask from scratch.
+    """
+    if not understanding:
+        return GATE_PROMPTS.get(gate_name, "")
+
+    original_prompt = GATE_PROMPTS.get(gate_name, "")
+
+    # Map gate names to numbers
+    gate_map = {"problem": 1, "solution": 2, "technical": 3}
+    gate_num = gate_map.get(gate_name)
+
+    if not gate_num:
+        return original_prompt
+
+    # Get context and mode for this gate
+    context, mode = get_understanding_context_for_gate(understanding, gate_num)
+
+    if mode == "full":
+        # Low confidence - use original prompt
+        return original_prompt
+
+    elif mode == "validate":
+        # Medium-high confidence - modify prompt to validate inferences
+        adapted = f"""## GATE {gate_num}: {"Problem Discovery" if gate_num == 1 else "Solution Space" if gate_num == 2 else "Technical Design"} (BROWNFIELD MODE)
+
+CONTEXT FROM CODEBASE ANALYSIS:
+{context}
+
+YOUR TASK:
+Since this is a brownfield project, I've inferred some context from the existing codebase.
+
+1. Present this inference to the user for validation
+2. Ask if it's accurate and what they would add or correct
+3. Once validated, proceed as normal
+
+If the user significantly corrects the inference, note that and update understanding.
+
+{original_prompt.split("EXIT CRITERIA")[1] if "EXIT CRITERIA" in original_prompt else ""}
+"""
+        return adapted
+
+    return original_prompt
+
+
 def build_context(state: SpecificationState) -> str:
     """Build context message for Claude."""
     context_parts = [f"Product idea: {state.product_idea}"]
@@ -1240,6 +1507,11 @@ def build_context(state: SpecificationState) -> str:
     if HEALTH_REPORT_PATH.exists():
         context_parts.append(_summarize_health_for_architect())
 
+    # Include known issues if available
+    known_issues_context = _format_known_issues_for_architect()
+    if known_issues_context:
+        context_parts.append(known_issues_context)
+
     # Include working memory context (Q&A, decisions, understanding)
     if MEMORY_AVAILABLE:
         memory_context = get_memory_context("architect")
@@ -1247,6 +1519,93 @@ def build_context(state: SpecificationState) -> str:
             context_parts.append(memory_context)
 
     return "\n".join(context_parts)
+
+
+def _format_known_issues_for_architect() -> str:
+    """
+    Format known issues from the registry for architect context injection.
+
+    Returns a formatted string highlighting critical and high-priority issues
+    that the architect should consider when designing features.
+    """
+    if not KNOWN_ISSUES_PATH.exists():
+        return ""
+
+    try:
+        data = json.loads(KNOWN_ISSUES_PATH.read_text())
+        issues = data.get("issues", [])
+        summary = data.get("summary", {})
+
+        if not issues:
+            return ""
+
+        lines = [
+            "\n## Known Issues (from Doctor)",
+            "",
+            "The following issues have been identified in the codebase.",
+            "Consider these when designing features that touch affected areas.",
+            "",
+        ]
+
+        # Group by severity
+        critical = [i for i in issues if i.get("severity") == "critical"]
+        high = [i for i in issues if i.get("severity") == "high"]
+        validated = [i for i in issues if i.get("status") == "validated"]
+
+        if critical:
+            lines.append("**Critical Issues:**")
+            for issue in critical[:5]:
+                source = issue.get("source", "unknown")
+                raw_text = issue.get("raw_text", "")[:80]
+                category = issue.get("category", "")
+                status = issue.get("status", "")
+                validation_note = ""
+                if issue.get("validation") and issue["validation"].get("notes"):
+                    validation_note = f" (verified: {issue['validation']['notes'][:40]})"
+                lines.append(f"- [{issue.get('id')}] ({category}) {raw_text}...")
+                lines.append(f"  Source: {source}, Status: {status}{validation_note}")
+            lines.append("")
+
+        if high:
+            lines.append("**High Priority Issues:**")
+            for issue in high[:5]:
+                source = issue.get("source", "unknown")
+                raw_text = issue.get("raw_text", "")[:80]
+                category = issue.get("category", "")
+                lines.append(f"- [{issue.get('id')}] ({category}) {raw_text}...")
+                lines.append(f"  Source: {source}")
+            lines.append("")
+
+        # Technical debt summary
+        tech_debt_count = summary.get("by_category", {}).get("technical_debt", 0)
+        if tech_debt_count > 0:
+            lines.append(f"**Technical Debt:** {tech_debt_count} items tracked (HACK, TODO, KLUDGE, etc.)")
+            lines.append("")
+
+        # Areas of concern
+        areas = {}
+        for issue in issues:
+            for code_file in issue.get("related_code", []):
+                parts = Path(code_file).parts
+                if len(parts) >= 2:
+                    area = f"{parts[0]}/{parts[1]}"
+                elif len(parts) == 1:
+                    area = parts[0]
+                else:
+                    continue
+                areas[area] = areas.get(area, 0) + 1
+
+        if areas:
+            top_areas = sorted(areas.items(), key=lambda x: x[1], reverse=True)[:3]
+            lines.append("**Areas of Concern:**")
+            for area, count in top_areas:
+                lines.append(f"- `{area}`: {count} issues")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except (json.JSONDecodeError, IOError) as e:
+        return ""
 
 
 def _extract_health_context() -> str:
@@ -1405,7 +1764,7 @@ def run_repl(state: SpecificationState) -> None:
         if user_input.lower() == "quit":
             print("\nSaving session...")
             save_state(state)
-            print("Session saved. Run 'python harness/architect.py resume' to continue.")
+            print("Session saved. Run '/architect resume' to continue.")
             return
 
         if user_input.lower() == "status":
@@ -1480,10 +1839,19 @@ Please address this feedback and update the features JSON."""
             record_answer("architect", main_question, user_input[:500])
             pending_questions = []
 
-        # Build system prompt
+        # Build system prompt with adaptive gates for brownfield
         system = SYSTEM_PROMPT.format(phase=state.phase.upper())
         if state.phase in GATE_PROMPTS:
-            system += "\n\n" + GATE_PROMPTS[state.phase]
+            # Check for understanding to adapt gates
+            understanding = _load_understanding()
+            if understanding and state.phase in ["problem", "solution", "technical"]:
+                adapted_prompt = _adapt_gate_prompt(state.phase, understanding)
+                system += "\n\n" + adapted_prompt
+                if not state.has_understanding:
+                    state.has_understanding = True
+                    save_state(state)
+            else:
+                system += "\n\n" + GATE_PROMPTS[state.phase]
 
         # Add context
         context = build_context(state)
@@ -1719,7 +2087,7 @@ When the user is satisfied, output the final JSON and say "GATE 6 COMPLETE"."""
     print(f"  - {FEATURES_PATH}")
     if TECH_PLAN_PATH.exists():
         print(f"  - {TECH_PLAN_PATH}")
-    print(f"\nNext step: python harness/coding/loop.py")
+    print(f"\nNext step: /loop")
 
 
 # =============================================================================
@@ -1860,10 +2228,10 @@ def print_status(state: SpecificationState) -> None:
 
 
 def audit_spec() -> int:
-    """Audit existing specification for completeness."""
+    """Audit existing specification for completeness (legacy)."""
     state = load_state()
     if not state:
-        print("No session found. Run 'python harness/architect.py new \"idea\"' first.")
+        print("No session found. Run '/architect new \"idea\"' first.")
         return 1
 
     print_status(state)
@@ -1871,6 +2239,173 @@ def audit_spec() -> int:
     # Return exit code based on completeness
     g5_ok, _ = check_gate5_criteria(state)
     return 0 if g5_ok else 1
+
+
+def cmd_audit_spec() -> int:
+    """
+    Validate existing specs without modifying them.
+
+    Performs comprehensive checks:
+    - Orphaned features (in features.json but no test file)
+    - Stale tech_plan (references removed dependencies)
+    - Conflicts with known_issues
+    - Features stuck in "failing" or "in_progress" too long
+    - Missing edge cases (features with < 3 edge cases)
+    - Inconsistent priorities
+    """
+    print("=" * 60)
+    print("SPEC AUDIT REPORT")
+    print("=" * 60)
+    print("")
+
+    warnings = []
+    suggestions = []
+
+    # Check if features.json exists
+    if not FEATURES_PATH.exists():
+        print("No features.json found. Nothing to audit.")
+        return 1
+
+    # Load features
+    try:
+        data = json.loads(FEATURES_PATH.read_text())
+        features = []
+        if isinstance(data, dict) and "features" in data:
+            features = [f for f in data["features"] if f.get("id") != "example-001"]
+        elif isinstance(data, list):
+            features = data
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading features.json: {e}")
+        return 1
+
+    if not features:
+        print("No features found in features.json.")
+        return 1
+
+    # Feature counts by status
+    status_counts = {}
+    for f in features:
+        status = f.get("status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    total = len(features)
+    passing = status_counts.get("passing", 0)
+    todo = status_counts.get("todo", 0)
+    failing = status_counts.get("failing", 0)
+    in_progress = status_counts.get("in_progress", 0)
+    blocked = status_counts.get("blocked", 0)
+
+    print(f"Features: {total} total ({passing} passing, {todo} todo, {failing} failing, {in_progress} in_progress, {blocked} blocked)")
+    print("")
+
+    # Check 1: Orphaned features (no test file)
+    test_patterns = ["tests/e2e/*.spec.ts", "tests/**/*.py", "tests/**/*.test.ts"]
+    test_files = []
+    for pattern in test_patterns:
+        test_files.extend([str(f.stem) for f in Path(".").glob(pattern)])
+
+    for f in features:
+        fid = f.get("id", "unknown")
+        # Check if any test file contains the feature id
+        has_test = any(fid in tf or fid.replace("-", "_") in tf for tf in test_files)
+        if not has_test and f.get("status") not in ["todo", "blocked"]:
+            warnings.append(f"Feature '{fid}' has no matching test file")
+
+    # Check 2: Features stuck in failing/in_progress
+    state = load_state()
+    if state and state.last_updated:
+        try:
+            last_update = datetime.fromisoformat(state.last_updated.replace("Z", "+00:00"))
+            days_since_update = (datetime.now(timezone.utc) - last_update).days
+
+            for f in features:
+                if f.get("status") in ["failing", "in_progress"] and days_since_update > 3:
+                    warnings.append(f"Feature '{f.get('id')}' has been '{f.get('status')}' for {days_since_update} days")
+        except (ValueError, TypeError):
+            pass
+
+    # Check 3: Missing edge cases
+    for f in features:
+        edge_cases = f.get("edge_cases", [])
+        if len(edge_cases) < 3:
+            warnings.append(f"Feature '{f.get('id')}' has only {len(edge_cases)} edge cases (minimum 3)")
+
+    # Check 4: Inconsistent priorities
+    priorities = [f.get("priority", 99) for f in features]
+    if len(priorities) != len(set(priorities)):
+        # Duplicate priorities
+        from collections import Counter
+        dupes = [p for p, count in Counter(priorities).items() if count > 1]
+        if dupes:
+            warnings.append(f"Duplicate priorities found: {dupes}")
+
+    # Check 5: Tech plan staleness
+    if TECH_PLAN_PATH.exists():
+        try:
+            tech_content = TECH_PLAN_PATH.read_text()
+
+            # Check for references to dependencies that no longer exist
+            if Path("package.json").exists():
+                pkg = json.loads(Path("package.json").read_text())
+                all_deps = set(pkg.get("dependencies", {}).keys()) | set(pkg.get("devDependencies", {}).keys())
+
+                # Common libraries that might be referenced in tech plan
+                tech_refs = re.findall(r'\b(lodash|underscore|moment|dayjs|axios|fetch|prisma|drizzle)\b', tech_content.lower())
+                for ref in tech_refs:
+                    # Check if referenced library is in deps
+                    if ref not in all_deps and ref != "fetch":  # fetch is built-in
+                        warnings.append(f"Tech plan references '{ref}' but it's not in package.json")
+
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Check 6: Known issues conflicts
+    if KNOWN_ISSUES_PATH.exists():
+        try:
+            issues_data = json.loads(KNOWN_ISSUES_PATH.read_text())
+            issues = issues_data.get("issues", [])
+
+            critical_issues = [i for i in issues if i.get("severity") == "critical" and i.get("status") != "resolved"]
+            if critical_issues:
+                suggestions.append(f"Consider addressing {len(critical_issues)} critical issues before adding features")
+
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Generate suggestions
+    if failing > 0:
+        suggestions.append(f"Fix {failing} failing features before adding new ones")
+    if blocked > 0:
+        suggestions.append(f"Review {blocked} blocked features for unblocking")
+    if any("edge case" in w for w in warnings):
+        suggestions.append("Run `architect refine` to add missing edge cases")
+
+    # Display results
+    if warnings:
+        print("Warnings:")
+        for w in warnings:
+            print(f"  \u26a0  {w}")
+        print("")
+
+    if suggestions:
+        print("Suggestions:")
+        for s in suggestions:
+            print(f"  \u2192 {s}")
+        print("")
+
+    if not warnings and not suggestions:
+        print("\u2714 Spec looks healthy! No issues found.")
+        print("")
+
+    # Summary
+    print("=" * 60)
+    if warnings:
+        print(f"Audit complete: {len(warnings)} warnings, {len(suggestions)} suggestions")
+    else:
+        print("Audit complete: All checks passed")
+    print("=" * 60)
+
+    return 1 if warnings else 0
 
 
 # =============================================================================
@@ -1912,11 +2447,11 @@ def cmd_new(product_idea: str) -> int:
                 print("=" * 60)
                 print("\nThe health report indicates critical issues that should be")
                 print("addressed before adding new features.")
-                print("\nRecommended: Run 'python harness/doctor.py stabilize' first.")
+                print("\nRecommended: Run '/doctor stabilize' first.")
                 print("")
                 response = input("Proceed anyway? (y/N): ").strip().lower()
                 if response != "y":
-                    print("\nRun 'python harness/doctor.py stabilize' to generate fix tasks.")
+                    print("\nRun '/doctor stabilize' to generate fix tasks.")
                     return 0
                 print("\nProceeding with caution...")
 
@@ -1929,6 +2464,26 @@ def cmd_new(product_idea: str) -> int:
             print("Warning: archaeologist module not found, skipping pattern extraction")
         except Exception as e:
             print(f"Warning: Pattern extraction failed: {e}")
+
+        # Extract codebase understanding for adaptive gates
+        if UNDERSTANDING_AVAILABLE:
+            print("\nExtracting codebase understanding...")
+            try:
+                understanding = extract_codebase_understanding()
+                understanding.save()
+                avg_confidence = (
+                    understanding.confidence_problem +
+                    understanding.confidence_approach +
+                    understanding.confidence_technical
+                ) / 3
+                if avg_confidence >= CONFIDENCE_THRESHOLDS["skip_gate"]:
+                    print(f"  High confidence ({avg_confidence:.0%}) - Gates 1-3 will be streamlined")
+                elif avg_confidence >= CONFIDENCE_THRESHOLDS["assist_gate"]:
+                    print(f"  Medium confidence ({avg_confidence:.0%}) - Will validate inferences")
+                else:
+                    print(f"  Low confidence ({avg_confidence:.0%}) - Standard questioning")
+            except Exception as e:
+                print(f"Warning: Understanding extraction failed: {e}")
 
     # Create new state
     state = SpecificationState(
@@ -1952,7 +2507,7 @@ def cmd_resume() -> int:
     """Resume an existing specification session."""
     state = load_state()
     if not state:
-        print("No session found. Run 'python harness/architect.py new \"idea\"' first.")
+        print("No session found. Run '/architect new \"idea\"' first.")
         return 1
 
     print(f"Resuming session for: {state.product_idea}")
@@ -1963,26 +2518,123 @@ def cmd_resume() -> int:
 
 
 def cmd_add_feature(description: str) -> int:
-    """Add a feature to existing specification (re-enters edge case gate)."""
+    """
+    Add a feature to existing specification (streamlined path).
+
+    For mature projects with existing specs, this skips Gates 1-3 and
+    goes directly to edge case interrogation for the new feature.
+    """
     state = load_state()
-    if not state:
-        print("No session found. Run 'python harness/architect.py new \"idea\"' first.")
-        return 1
 
-    if state.phase not in ["edges", "synthesis", "complete"]:
-        print(f"Cannot add features in phase '{state.phase}'. Complete gates 1-3 first.")
-        return 1
+    # Check if we have existing context
+    project_state = detect_project_state()
 
-    # Reset to edge case gate with new feature context
-    state.phase = "edges"
-    state.messages.append({
-        "role": "user",
-        "content": f"I want to add a new feature: {description}"
-    })
-    save_state(state)
+    if project_state.has_tech_plan and project_state.has_features:
+        # Mature project - streamlined path
+        print("\n" + "=" * 60)
+        print("ADD FEATURE - Streamlined Path")
+        print("=" * 60)
+        print(f"\nAdding feature: {description}")
+        print(f"Existing features: {project_state.features_count}")
 
-    run_repl(state)
-    return 0
+        # Create or update state
+        if not state:
+            state = SpecificationState(
+                phase="edges",
+                product_idea="(Existing project)",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                tech_plan_generated=True,
+            )
+        else:
+            state.phase = "edges"
+            state.tech_plan_generated = True
+
+        # Load existing context
+        existing_context = load_existing_context(state)
+
+        # Build streamlined system prompt
+        streamlined_prompt = f"""## ADD FEATURE MODE (Streamlined)
+
+You are helping add a new feature to an existing, well-specified project.
+
+CONTEXT ALREADY ESTABLISHED:
+{existing_context}
+
+SKIP GATES 1-3 (already complete).
+START DIRECTLY AT GATE 4 (Edge Cases).
+
+The user wants to add: "{description}"
+
+YOUR TASK:
+1. Acknowledge the existing context briefly
+2. Ask about edge cases for this new feature
+3. Apply the Rule of 3 (minimum 3 edge cases)
+4. Once edge cases are defined, generate the feature JSON
+5. Add it to the backlog with appropriate priority
+
+Remember: This is an addition to existing spec, not starting from scratch.
+"""
+
+        # Add initial message with context
+        state.messages = []  # Clear old messages
+        state.messages.append({
+            "role": "system",
+            "content": streamlined_prompt
+        })
+        state.messages.append({
+            "role": "user",
+            "content": f"I want to add a new feature: {description}"
+        })
+
+        save_state(state)
+        run_repl(state)
+        return 0
+
+    elif project_state.has_tech_plan:
+        # Has tech plan but no features - semi-streamlined
+        print("\nTech plan exists but no features yet.")
+        print("Starting at Gate 4 (Edge Cases)...")
+
+        if not state:
+            state = SpecificationState(
+                phase="edges",
+                product_idea="(Existing project)",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                tech_plan_generated=True,
+            )
+        else:
+            state.phase = "edges"
+            state.tech_plan_generated = True
+
+        state.messages.append({
+            "role": "user",
+            "content": f"I want to add a new feature: {description}"
+        })
+
+        save_state(state)
+        run_repl(state)
+        return 0
+
+    else:
+        # No existing context - need to complete gates 1-3 first
+        if not state:
+            print("No session found. Run '/architect new \"idea\"' first.")
+            return 1
+
+        if state.phase not in ["edges", "synthesis", "refinement", "complete"]:
+            print(f"Cannot add features in phase '{state.phase}'. Complete gates 1-3 first.")
+            return 1
+
+        # Reset to edge case gate with new feature context
+        state.phase = "edges"
+        state.messages.append({
+            "role": "user",
+            "content": f"I want to add a new feature: {description}"
+        })
+        save_state(state)
+
+        run_repl(state)
+        return 0
 
 
 def cmd_scan() -> int:
@@ -1996,19 +2648,150 @@ def cmd_scan() -> int:
         return 1
 
 
+def cmd_smart_start() -> int:
+    """
+    Smart entry point that detects project state and selects workflow.
+
+    Defaults to add-feature mode when specs already exist.
+    """
+    project_state = detect_project_state()
+    workflow = select_workflow(project_state)
+
+    print("\n" + "=" * 60)
+    print("ARCHITECT - Project Analysis")
+    print("=" * 60)
+    print(f"\nDetected state:")
+    print(f"  Codebase: {'Yes' if project_state.has_codebase else 'No'}")
+    print(f"  Session: {'Yes' if project_state.has_session else 'No'}")
+    print(f"  Tech Plan: {'Yes' if project_state.has_tech_plan else 'No'}")
+    print(f"  Features: {project_state.features_count if project_state.has_features else 'None'}")
+    if project_state.features_status:
+        status_str = ", ".join(f"{k}: {v}" for k, v in project_state.features_status.items())
+        print(f"  Status: {status_str}")
+
+    print(f"\nRecommended workflow: {workflow.upper()}")
+
+    if workflow == "resume_session":
+        print("\nFound existing session. Options:")
+        print("  [1] Resume - Continue from where you left off")
+        print("  [2] Fresh - Start new specification (overwrites session)")
+        print("  [3] Add feature - Add to existing spec")
+        print("")
+
+        choice = input("Choice [1/2/3]: ").strip()
+        if choice == "1" or choice.lower() == "resume":
+            return cmd_resume()
+        elif choice == "2" or choice.lower() == "fresh":
+            idea = input("Enter product idea: ").strip()
+            if idea:
+                return cmd_new(idea)
+            print("No idea provided, aborting.")
+            return 1
+        elif choice == "3" or choice.lower() == "add":
+            desc = input("Enter feature description: ").strip()
+            if desc:
+                return cmd_add_feature(desc)
+            print("No description provided, aborting.")
+            return 1
+        else:
+            return cmd_resume()
+
+    elif workflow == "add_feature":
+        print(f"\nFound existing spec with {project_state.features_count} features.")
+        print("Options:")
+        print("  [1] Add feature - Add new feature (default)")
+        print("  [2] Review - Review current backlog")
+        print("  [3] Fresh - Start fresh specification")
+        print("")
+
+        choice = input("Choice [1/2/3] (default=1): ").strip() or "1"
+        if choice == "1" or choice.lower() == "add":
+            desc = input("Enter feature description: ").strip()
+            if desc:
+                return cmd_add_feature(desc)
+            print("No description provided, aborting.")
+            return 1
+        elif choice == "2" or choice.lower() == "review":
+            # Enter refinement mode
+            state = load_state()
+            if not state:
+                # Create minimal state for refinement
+                state = SpecificationState(
+                    phase="refinement",
+                    product_idea="(Existing project)",
+                    created_at=datetime.now(timezone.utc).isoformat()
+                )
+            state.phase = "refinement"
+            save_state(state)
+            run_repl(state)
+            return 0
+        elif choice == "3" or choice.lower() == "fresh":
+            idea = input("Enter product idea: ").strip()
+            if idea:
+                return cmd_new(idea)
+            print("No idea provided, aborting.")
+            return 1
+        else:
+            return 0
+
+    elif workflow == "continue_from_tech":
+        print("\nFound tech plan but no features.")
+        print("Continuing from Gate 4 (Edge Cases)...")
+
+        state = load_state()
+        if not state:
+            state = SpecificationState(
+                phase="edges",
+                product_idea="(Existing project)",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                tech_plan_generated=True,
+            )
+        else:
+            state.phase = "edges"
+            state.tech_plan_generated = True
+
+        save_state(state)
+        run_repl(state)
+        return 0
+
+    elif workflow == "brownfield_fresh":
+        print("\nExisting codebase detected. No spec found.")
+        print("This will run Phase 0 (health check) then start specification.")
+        print("")
+
+        idea = input("Enter product idea (or press Enter for guided discovery): ").strip()
+        if idea:
+            return cmd_new(idea)
+        else:
+            # Start with a generic idea, will discover through conversation
+            return cmd_new("Improve existing application")
+
+    else:  # greenfield
+        print("\nNo existing codebase or spec found.")
+        print("")
+
+        idea = input("Enter product idea: ").strip()
+        if idea:
+            return cmd_new(idea)
+        print("No idea provided, aborting.")
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Socratic Architect - Adversarial Specification System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python harness/architect.py new "A todo app with user authentication"
-  python harness/architect.py resume
-  python harness/architect.py audit
-  python harness/architect.py add-feature "Email notifications"
-  python harness/architect.py scan
-  python harness/architect.py docs backfill
-  python harness/architect.py docs status
+  /architect               # Smart start (detects state) - in harness shell
+  /architect new "A todo app with user authentication"
+  /architect resume
+  /architect audit
+  /architect audit-spec    # Validate existing spec
+  /architect add-feature "Email notifications"
+  /architect scan
+  /architect docs backfill
+  /architect docs status
         """
     )
 
@@ -2023,6 +2806,9 @@ Examples:
 
     # audit command
     subparsers.add_parser("audit", help="Audit specification completeness")
+
+    # audit-spec command (detailed validation)
+    subparsers.add_parser("audit-spec", help="Detailed validation of existing spec")
 
     # add-feature command
     add_parser = subparsers.add_parser("add-feature", help="Add feature to existing spec")
@@ -2049,6 +2835,8 @@ Examples:
         return cmd_resume()
     elif args.command == "audit":
         return audit_spec()
+    elif args.command == "audit-spec":
+        return cmd_audit_spec()
     elif args.command == "add-feature":
         return cmd_add_feature(args.description)
     elif args.command == "scan":
@@ -2063,8 +2851,8 @@ Examples:
         else:  # status
             return docs_status()
     else:
-        parser.print_help()
-        return 0
+        # No command given - use smart start
+        return cmd_smart_start()
 
 
 if __name__ == "__main__":

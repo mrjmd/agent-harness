@@ -60,29 +60,43 @@ Navigation:
   /quit, /exit, /q    Exit the shell
 
 Harness Workflows:
-  /architect [new|resume|audit]
-                      Run architect specification workflow
-                      - new "idea"  Start new specification
-                      - resume      Continue existing session
-                      - audit       Check specification status
+  /architect [cmd]    Run architect specification workflow
+                      - (no args)        Smart-start auto-detection (default)
+                      - new "idea"       Start new specification
+                      - resume           Continue existing session
+                      - audit            Check specification status (alias: audit-spec)
+                      - add-feature "d"  Add feature to existing spec
+                      - scan             Scan codebase for patterns
+                      - docs [cmd]       Documentation (backfill|status)
 
-  /loop [--autonomous] [--cadence N]
-                      Run the implementation loop
-                      - --autonomous, -a  Run without pausing at checkpoints
-                      - --cadence N       Checkpoint every N features
+  /loop [flags]       Run the implementation loop
+                      - --autonomous, -a   Run without pausing
+                      - --interactive, -i  Always pause at checkpoints
+                      - --cadence/-c N     Checkpoint every N features
 
-  /doctor [diagnose|stabilize|baseline|qa|solidify]
-                      Health diagnostics and stabilization
-                      - diagnose    Full health audit (default)
-                      - stabilize   Generate fix tasks
-                      - baseline    Generate test strategy
-                      - qa          Generate QA checklist
+  /bug "description"  Quick bugfix entry (bypasses architect ceremony)
+                      Creates feature → /loop does TDD fix → full verification
+
+  /doctor [cmd]       Health diagnostics and stabilization
+                      - (no args)   Interactive guided flow (default)
+                      - status      Show current phase and progress
+                      - next        Run the next phase (non-interactive)
+                      - reset       Reset state and start over
+                      - diagnose    Full health audit
+                      - qa          QA verification checklist
                       - solidify    Generate baseline tests
+                      - baseline    Test strategy recommendations
+                      - stabilize   Generate fix tasks
 
-  /docs [backfill|status]
-                      Documentation generation
-                      - backfill   Generate docs for all passing features
-                      - status     Show documentation status
+  /docs [cmd]         Documentation generation
+                      - status           Show documentation status (default)
+                      - backfill         Generate docs for passing features
+                      - generate <id>    Generate doc for specific feature
+
+  /memory [cmd]       Working memory management
+                      - status [comp]    Show memory stats (default)
+                      - search <query>   Search learnings and archive
+                      - clear <comp>     Clear memory for component
 
 Tips:
   - Type a natural language question to query the codebase
@@ -197,14 +211,48 @@ def cmd_quit(args: str) -> str:
 def cmd_architect(args: str) -> str:
     """Run architect specification workflow."""
     try:
-        from architect import cmd_new, cmd_resume, audit_spec
+        from architect import (
+            cmd_new,
+            cmd_resume,
+            audit_spec,
+            cmd_add_feature,
+            cmd_scan,
+            cmd_smart_start,
+        )
     except ImportError as e:
         return f"Error: Could not import architect module: {e}"
 
+    # Docs integration
+    try:
+        from docs import backfill_docs, cmd_status as docs_status
+        docs_available = True
+    except ImportError:
+        docs_available = False
+
     args = args.strip()
     parts = args.split(maxsplit=1)
-    subcommand = parts[0] if parts else "resume"
+    subcommand = parts[0] if parts else ""
     sub_args = parts[1] if len(parts) > 1 else ""
+
+    # Default: smart-start auto-detection
+    if subcommand == "" or subcommand == "help":
+        if subcommand == "":
+            print("\nRunning smart-start auto-detection...\n")
+            result = cmd_smart_start()
+            return f"\nArchitect session completed with exit code: {result}"
+        else:
+            return """Usage: /architect [command]
+
+Commands:
+  (no args)         Smart-start - auto-detect project state (default)
+  new "idea"        Start new specification session
+  resume            Resume existing session
+  audit             Check specification completeness
+  audit-spec        Alias for audit
+  add-feature "desc"  Add feature to existing spec (streamlined)
+  scan              Scan codebase for patterns
+  docs [cmd]        Documentation commands (backfill|status)
+"""
 
     if subcommand == "new":
         if not sub_args:
@@ -220,17 +268,62 @@ def cmd_architect(args: str) -> str:
         result = cmd_resume()
         return f"\nArchitect session completed with exit code: {result}"
 
-    elif subcommand == "audit":
+    elif subcommand == "audit" or subcommand == "audit-spec":
         result = audit_spec()
         return f"\nAudit completed with exit code: {result}"
+
+    elif subcommand == "add-feature":
+        if not sub_args:
+            return "Usage: /architect add-feature \"feature description\""
+        # Remove quotes if present
+        description = sub_args.strip("\"'")
+        print(f"\nAdding feature: {description}\n")
+        result = cmd_add_feature(description)
+        return f"\nAdd feature completed with exit code: {result}"
+
+    elif subcommand == "scan":
+        print("\nScanning codebase for patterns...\n")
+        result = cmd_scan()
+        return f"\nScan completed with exit code: {result}"
+
+    elif subcommand == "docs":
+        if not docs_available:
+            return "Error: docs module not available"
+
+        docs_cmd = sub_args.split()[0] if sub_args else "status"
+
+        if docs_cmd == "backfill":
+            print("\nBackfilling documentation...\n")
+            result = backfill_docs()
+            errors = result.get("errors", [])
+            if errors:
+                return f"\nBackfill completed with {len(errors)} errors"
+            return f"\nBackfill completed: {len(result.get('generated', []))} docs generated"
+
+        elif docs_cmd == "status":
+            result = docs_status()
+            return f"\nDocumentation status check completed with exit code: {result}"
+
+        else:
+            return """Usage: /architect docs [command]
+
+Commands:
+  status    Show documentation status (default)
+  backfill  Generate docs for all passing features
+"""
 
     else:
         return """Usage: /architect [command]
 
 Commands:
-  new "idea"   Start new specification session
-  resume       Resume existing session (default)
-  audit        Check specification completeness
+  (no args)         Smart-start - auto-detect project state (default)
+  new "idea"        Start new specification session
+  resume            Resume existing session
+  audit             Check specification completeness
+  audit-spec        Alias for audit
+  add-feature "desc"  Add feature to existing spec (streamlined)
+  scan              Scan codebase for patterns
+  docs [cmd]        Documentation commands (backfill|status)
 """
 
 
@@ -251,6 +344,7 @@ def cmd_loop(args: str) -> str:
     # Parse args
     args = args.strip()
     autonomous = "--autonomous" in args or "-a" in args
+    interactive = "--interactive" in args or "-i" in args
     cadence = DEFAULT_CHECKPOINT_CADENCE
 
     # Parse --cadence N
@@ -260,15 +354,24 @@ def cmd_loop(args: str) -> str:
         if match:
             cadence = int(match.group(1))
 
-    mode_str = "autonomous" if autonomous else "interactive"
+    # Determine mode (interactive takes precedence if both specified)
+    if interactive:
+        mode_str = "interactive"
+    elif autonomous:
+        mode_str = "autonomous"
+    else:
+        mode_str = "interactive"  # Default
+
     print(f"\nStarting implementation loop ({mode_str}, cadence={cadence})...\n")
 
     # Build sys.argv for the loop main function
     old_argv = sys.argv
     try:
         new_argv = ["loop.py"]
-        if autonomous:
+        if autonomous and not interactive:
             new_argv.append("--autonomous")
+        elif interactive:
+            new_argv.append("--interactive")
         new_argv.extend(["--cadence", str(cadence)])
         sys.argv = new_argv
         result = loop_main()
@@ -278,12 +381,126 @@ def cmd_loop(args: str) -> str:
 
 
 # =============================================================================
+# Bug Command (Quick Feature Entry for Bugfixes)
+# =============================================================================
+
+@register_command("bug", aliases=["fix"])
+def cmd_bug(args: str) -> str:
+    """
+    Quick bug entry - creates a feature for the loop to fix.
+
+    Bypasses architect ceremony but still goes through full TDD loop
+    with verification, regression tests, etc.
+    """
+    import json
+    import re
+    from datetime import datetime, timezone
+
+    FEATURES_PATH = Path("specs/features.json")
+
+    args = args.strip()
+
+    if not args or args == "help":
+        return """Usage: /bug "description of the bug"
+
+Creates a bugfix feature entry that goes through the full loop:
+- TDD: Write failing test first
+- Implementation: Fix the bug
+- Verification: Harness verifies the fix
+- Regression: Full test suite runs
+
+Examples:
+  /bug "Settings form throws error when saving API key"
+  /bug "Login redirects to wrong page after authentication"
+  /bug "Date picker shows wrong format in reports"
+
+The bug will be added to specs/features.json with status 'todo'.
+Run /loop to start working on it.
+"""
+
+    # Remove surrounding quotes if present
+    description = args.strip("\"'")
+
+    # Load existing features
+    if FEATURES_PATH.exists():
+        try:
+            data = json.loads(FEATURES_PATH.read_text())
+            features = data.get("features", [])
+        except json.JSONDecodeError:
+            return f"Error: {FEATURES_PATH} contains invalid JSON"
+    else:
+        # Create new features file
+        FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        features = []
+        data = {"features": features}
+
+    # Find next bug number
+    existing_bug_nums = []
+    for f in features:
+        fid = f.get("id", "")
+        match = re.match(r"bug-(\d+)", fid)
+        if match:
+            existing_bug_nums.append(int(match.group(1)))
+
+    next_num = max(existing_bug_nums, default=0) + 1
+
+    # Generate slug from description (first few meaningful words)
+    slug_words = re.findall(r'[a-zA-Z]+', description.lower())[:4]
+    slug = "-".join(slug_words) if slug_words else "fix"
+
+    # Create feature entry
+    feature_id = f"bug-{next_num:03d}-{slug}"
+
+    # Generate a concise name from description
+    name = description[:60] + "..." if len(description) > 60 else description
+    if not name.lower().startswith("fix"):
+        name = f"Fix: {name}"
+
+    new_feature = {
+        "id": feature_id,
+        "name": name,
+        "description": description,
+        "type": "bugfix",
+        "status": "todo",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Add to features list
+    features.append(new_feature)
+    data["features"] = features
+
+    # Save
+    FEATURES_PATH.write_text(json.dumps(data, indent=2))
+
+    # Count pending bugs and features
+    pending = [f for f in features if f.get("status") in ("todo", "in_progress", "failing")]
+    pending_bugs = [f for f in pending if f.get("type") == "bugfix"]
+
+    return f"""
+Bug added to specs/features.json:
+
+  ID: {feature_id}
+  Name: {name}
+  Status: todo
+
+Pending items: {len(pending)} ({len(pending_bugs)} bugs)
+
+Run /loop to start the TDD fix cycle:
+  1. Loop writes a failing test that reproduces the bug
+  2. Loop implements the fix
+  3. Harness verifies the test passes
+  4. Full regression suite runs
+  5. Commit on success
+"""
+
+
+# =============================================================================
 # Doctor Commands
 # =============================================================================
 
 @register_command("doctor", aliases=["doc"])
 def cmd_doctor(args: str) -> str:
-    """Run health diagnostics."""
+    """Run health diagnostics and guided stabilization workflow."""
     try:
         from doctor import (
             cmd_diagnose,
@@ -291,14 +508,37 @@ def cmd_doctor(args: str) -> str:
             cmd_baseline,
             cmd_qa,
             cmd_solidify,
+            cmd_guided_flow,
+            cmd_status,
+            cmd_next_phase,
+            cmd_reset,
         )
     except ImportError as e:
         return f"Error: Could not import doctor module: {e}"
 
     args = args.strip()
-    subcommand = args.split()[0] if args else "diagnose"
+    subcommand = args.split()[0] if args else ""
 
-    if subcommand == "diagnose":
+    # Guided workflow commands
+    if subcommand == "" or subcommand == "flow":
+        # Default: interactive guided flow
+        result = cmd_guided_flow()
+        return f"\nGuided flow completed with exit code: {result}"
+
+    elif subcommand == "status":
+        result = cmd_status()
+        return ""  # status already prints output
+
+    elif subcommand == "next":
+        result = cmd_next_phase()
+        return f"\nPhase completed with exit code: {result}"
+
+    elif subcommand == "reset":
+        result = cmd_reset()
+        return ""  # reset already prints output
+
+    # Phase commands (standalone)
+    elif subcommand == "diagnose":
         print("\nRunning health diagnosis...\n")
         result = cmd_diagnose()
         return f"\nDiagnosis completed with exit code: {result}"
@@ -326,12 +566,20 @@ def cmd_doctor(args: str) -> str:
     else:
         return """Usage: /doctor [command]
 
-Commands:
-  diagnose    Full health audit (default)
-  stabilize   Generate fix tasks from health report
-  baseline    Generate test strategy recommendations
-  qa          Generate manual QA verification checklist
-  solidify    Generate baseline tests from verified QA
+Guided Workflow (recommended for brownfield projects):
+  (no args)   Interactive guided flow through all phases
+  status      Show current phase and progress
+  next        Run the next phase (non-interactive)
+  reset       Reset state and start over
+
+Individual Phase Commands:
+  diagnose    Phase 1: Full health audit (ASSESS)
+  qa          Phase 2: Manual QA verification checklist (VERIFY)
+  solidify    Phase 3: Generate baseline tests (PROTECT)
+  baseline    Phase 4: Test strategy recommendations (COVERAGE)
+  stabilize   Phase 5: Generate fix tasks (FIX)
+
+The guided flow walks you through: ASSESS → VERIFY → PROTECT → COVERAGE → FIX
 """
 
 
@@ -343,12 +591,14 @@ Commands:
 def cmd_docs(args: str) -> str:
     """Documentation generation commands."""
     try:
-        from docs import backfill_docs, cmd_status as docs_status
+        from docs import backfill_docs, cmd_status as docs_status, cmd_generate
     except ImportError as e:
         return f"Error: Could not import docs module: {e}"
 
     args = args.strip()
-    subcommand = args.split()[0] if args else "status"
+    parts = args.split(maxsplit=1)
+    subcommand = parts[0] if parts else "status"
+    sub_args = parts[1] if len(parts) > 1 else ""
 
     if subcommand == "backfill":
         print("\nBackfilling documentation...\n")
@@ -362,12 +612,172 @@ def cmd_docs(args: str) -> str:
         result = docs_status()
         return f"\nDocumentation status check completed with exit code: {result}"
 
+    elif subcommand == "generate":
+        if not sub_args:
+            return "Usage: /docs generate <feature_id>"
+        feature_id = sub_args.strip()
+        print(f"\nGenerating documentation for feature: {feature_id}\n")
+        result = cmd_generate(feature_id)
+        return f"\nGenerate completed with exit code: {result}"
+
     else:
         return """Usage: /docs [command]
 
 Commands:
-  status    Show documentation status (default)
-  backfill  Generate docs for all passing features
+  status              Show documentation status (default)
+  backfill            Generate docs for all passing features
+  generate <id>       Generate doc for specific feature
+"""
+
+
+# =============================================================================
+# Memory Commands
+# =============================================================================
+
+@register_command("memory", aliases=["mem"])
+def cmd_memory(args: str) -> str:
+    """Working memory management commands."""
+    try:
+        from memory import (
+            read_memory,
+            clear_memory,
+            search_learnings,
+            search_archive,
+            search_similar_problems,
+            format_historical_matches,
+            MEMORY_DIR,
+            INDEX_PATH,
+            ATTEMPT_JOURNAL_AVAILABLE,
+        )
+    except ImportError as e:
+        return f"Error: Could not import memory module: {e}"
+
+    import json
+    from pathlib import Path
+
+    args = args.strip()
+    parts = args.split(maxsplit=1)
+    subcommand = parts[0] if parts else "status"
+    sub_args = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == "status":
+        # Show memory stats
+        lines = ["\n=== Working Memory Status ===\n"]
+
+        # Check memory directory
+        if not MEMORY_DIR.exists():
+            lines.append("Memory directory: Not created yet")
+        else:
+            # List memory files
+            memory_files = list(MEMORY_DIR.glob("*.md"))
+            lines.append(f"Memory directory: {MEMORY_DIR}")
+            lines.append(f"Memory files: {len(memory_files)}")
+
+            if memory_files:
+                lines.append("\nComponents:")
+                for mf in memory_files:
+                    mem = read_memory(mf.stem)
+                    q_count = len(mem.questions)
+                    d_count = len(mem.decisions)
+                    lines.append(f"  - {mf.stem}: {q_count} Q&A, {d_count} decisions")
+
+        # Check index
+        if INDEX_PATH.exists():
+            try:
+                index = json.loads(INDEX_PATH.read_text())
+                lines.append(f"\nIndex entries: {len(index)}")
+            except json.JSONDecodeError:
+                lines.append("\nIndex: Invalid JSON")
+        else:
+            lines.append("\nIndex: Not created yet")
+
+        # Check learnings
+        learnings_path = Path("specs/learnings.json")
+        if learnings_path.exists():
+            try:
+                data = json.loads(learnings_path.read_text())
+                learnings = data.get("learnings", [])
+                lines.append(f"Learnings: {len(learnings)} entries")
+            except json.JSONDecodeError:
+                lines.append("Learnings: Invalid JSON")
+        else:
+            lines.append("Learnings: Not created yet")
+
+        # Check attempt journal availability
+        lines.append(f"\nAttempt journal available: {ATTEMPT_JOURNAL_AVAILABLE}")
+
+        if sub_args:
+            # Show detail for specific component
+            component = sub_args.strip()
+            mem = read_memory(component)
+            if mem.questions or mem.decisions or mem.understanding:
+                lines.append(f"\n=== {component} Memory Detail ===")
+                lines.append(f"Questions: {len(mem.questions)}")
+                for q, entry in mem.questions.items():
+                    lines.append(f"  Q: {q[:60]}...")
+                    lines.append(f"  A: {entry.answer[:60]}...")
+                lines.append(f"Decisions: {len(mem.decisions)}")
+                for d in mem.decisions:
+                    lines.append(f"  - {d.summary}")
+            else:
+                lines.append(f"\nNo memory found for component: {component}")
+
+        return "\n".join(lines)
+
+    elif subcommand == "search":
+        if not sub_args:
+            return "Usage: /memory search <query>"
+
+        query = sub_args.strip()
+        print(f"\nSearching for: {query}\n")
+
+        # Search learnings
+        learning_matches = search_learnings(query, max_results=5)
+
+        # Search archive if available
+        archive_matches = []
+        if ATTEMPT_JOURNAL_AVAILABLE:
+            archive_matches = search_archive(error_query=query, max_results=5)
+
+        all_matches = learning_matches + archive_matches
+        all_matches.sort(key=lambda m: m.similarity_score, reverse=True)
+        all_matches = all_matches[:10]  # Top 10
+
+        if all_matches:
+            return format_historical_matches(all_matches)
+        else:
+            return "No matches found."
+
+    elif subcommand == "clear":
+        if not sub_args:
+            return """Usage: /memory clear <component|all>
+
+Components: architect, doctor, loop, or 'all' for everything
+
+WARNING: This permanently deletes stored memory!"""
+
+        target = sub_args.strip().lower()
+
+        if target == "all":
+            # Clear all memory
+            if MEMORY_DIR.exists():
+                for mf in MEMORY_DIR.glob("*.md"):
+                    mf.unlink()
+                if INDEX_PATH.exists():
+                    INDEX_PATH.unlink()
+            return "All memory cleared."
+        else:
+            # Clear specific component
+            clear_memory(target)
+            return f"Memory cleared for component: {target}"
+
+    else:
+        return """Usage: /memory [command]
+
+Commands:
+  status [component]  Show memory stats (default)
+  search <query>      Search learnings and archive
+  clear <component>   Clear memory (component name or 'all')
 """
 
 

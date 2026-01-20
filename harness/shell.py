@@ -8,7 +8,7 @@ A conversational interface for the agent harness that allows:
 3. Conversation context maintained across queries
 
 Usage:
-    python harness/shell.py
+    harness shell    # Start interactive shell
 
 Commands start with /. Everything else is sent to Claude as a query.
 """

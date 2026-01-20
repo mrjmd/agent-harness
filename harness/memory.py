@@ -34,6 +34,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Import attempt journal for archive search (optional)
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent / "coding"))
+    from attempt_journal import (
+        load_archived_journal,
+        list_archived_journals,
+        AttemptJournal,
+    )
+    ATTEMPT_JOURNAL_AVAILABLE = True
+except ImportError:
+    ATTEMPT_JOURNAL_AVAILABLE = False
+
+# Import learnings for search (optional)
+LEARNINGS_PATH = Path("specs/learnings.json")
+
 
 # Memory storage location
 MEMORY_DIR = Path("specs/memory")
@@ -575,6 +591,261 @@ def clear_memory(component: str) -> None:
                 INDEX_PATH.write_text(json.dumps(index, indent=2))
         except json.JSONDecodeError:
             pass
+
+
+# =============================================================================
+# Archive Search Functions
+# =============================================================================
+
+@dataclass
+class HistoricalMatch:
+    """A match from historical search."""
+    source: str  # "learnings" or "archive"
+    feature_id: str
+    similarity_score: float
+    lesson_or_resolution: str
+    original_context: str = ""
+
+
+def _compute_text_similarity(text1: str, text2: str) -> float:
+    """
+    Compute similarity between two text strings using word overlap.
+
+    Returns a score between 0 and 1.
+    """
+    if not text1 or not text2:
+        return 0.0
+
+    # Extract words
+    words1 = set(re.findall(r'\b[a-zA-Z]{3,}\b', text1.lower()))
+    words2 = set(re.findall(r'\b[a-zA-Z]{3,}\b', text2.lower()))
+
+    if not words1 or not words2:
+        return 0.0
+
+    # Jaccard similarity
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+
+    return intersection / union if union > 0 else 0.0
+
+
+def search_learnings(
+    query: str,
+    max_results: int = 5,
+    min_similarity: float = 0.2
+) -> list[HistoricalMatch]:
+    """
+    Search learnings.json for relevant lessons.
+
+    Args:
+        query: Search query (error message, approach description, etc.)
+        max_results: Maximum number of results to return
+        min_similarity: Minimum similarity score to include
+
+    Returns:
+        List of HistoricalMatch objects sorted by similarity
+    """
+    if not LEARNINGS_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(LEARNINGS_PATH.read_text())
+        learnings = data.get("learnings", [])
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+    matches = []
+
+    for learning in learnings:
+        lesson = learning.get("lesson", "")
+        context = learning.get("context", "")
+        feature_id = learning.get("feature_id", "unknown")
+
+        # Combine lesson and context for matching
+        combined_text = f"{lesson} {context}"
+        similarity = _compute_text_similarity(query, combined_text)
+
+        if similarity >= min_similarity:
+            matches.append(HistoricalMatch(
+                source="learnings",
+                feature_id=feature_id,
+                similarity_score=similarity,
+                lesson_or_resolution=lesson,
+                original_context=context
+            ))
+
+    # Sort by similarity and return top results
+    matches.sort(key=lambda m: m.similarity_score, reverse=True)
+    return matches[:max_results]
+
+
+def search_archive(
+    error_query: str = "",
+    approach_query: str = "",
+    max_results: int = 5,
+    min_similarity: float = 0.2
+) -> list[HistoricalMatch]:
+    """
+    Search archived attempt journals for similar problems.
+
+    Args:
+        error_query: Error message to search for
+        approach_query: Approach description to search for
+        max_results: Maximum number of results to return
+        min_similarity: Minimum similarity score to include
+
+    Returns:
+        List of HistoricalMatch objects sorted by similarity
+    """
+    if not ATTEMPT_JOURNAL_AVAILABLE:
+        return []
+
+    matches = []
+
+    for feature_id in list_archived_journals():
+        journal = load_archived_journal(feature_id)
+        if not journal:
+            continue
+
+        # Search through attempts
+        for attempt in journal.attempts:
+            # Match against error signatures
+            if error_query and attempt.verification:
+                error_sig = attempt.verification.error_signature or ""
+                similarity = _compute_text_similarity(error_query, error_sig)
+
+                if similarity >= min_similarity:
+                    # If this error was eventually resolved, find the resolution
+                    resolution = _find_resolution_for_error(journal, attempt)
+
+                    matches.append(HistoricalMatch(
+                        source="archive",
+                        feature_id=feature_id,
+                        similarity_score=similarity,
+                        lesson_or_resolution=resolution or f"Error occurred in feature {feature_id}",
+                        original_context=error_sig[:200]
+                    ))
+
+            # Match against approach summaries
+            if approach_query and attempt.approach_summary:
+                similarity = _compute_text_similarity(approach_query, attempt.approach_summary)
+
+                if similarity >= min_similarity:
+                    # Check if this approach worked
+                    worked = attempt.verification.passed if attempt.verification else False
+
+                    matches.append(HistoricalMatch(
+                        source="archive",
+                        feature_id=feature_id,
+                        similarity_score=similarity,
+                        lesson_or_resolution=f"Approach {'succeeded' if worked else 'failed'}: {attempt.approach_summary[:100]}",
+                        original_context=f"Feature: {feature_id}, Attempt: {attempt.attempt_num}"
+                    ))
+
+    # Sort by similarity and return top results
+    matches.sort(key=lambda m: m.similarity_score, reverse=True)
+    return matches[:max_results]
+
+
+def _find_resolution_for_error(journal: 'AttemptJournal', error_attempt) -> Optional[str]:
+    """Find how an error was eventually resolved in a journal."""
+    error_hash = error_attempt.verification.error_hash if error_attempt.verification else None
+
+    if not error_hash:
+        return None
+
+    # Look for a passing attempt after this error
+    for attempt in journal.attempts:
+        if attempt.attempt_num > error_attempt.attempt_num:
+            if attempt.verification and attempt.verification.passed:
+                return f"Resolved by: {attempt.approach_summary[:150]}"
+
+    # If feature completed successfully, the last approach worked
+    if journal.final_status == "passing" and journal.attempts:
+        last = journal.attempts[-1]
+        if last.approach_summary:
+            return f"Eventually resolved by: {last.approach_summary[:150]}"
+
+    return None
+
+
+def search_similar_problems(
+    current_error: str = "",
+    current_approach: str = "",
+    search_learnings_flag: bool = True,
+    search_archive_flag: bool = True,
+    max_results: int = 5
+) -> list[HistoricalMatch]:
+    """
+    Find similar problems from past experience.
+
+    Searches both learnings.json and archived attempt journals.
+
+    Args:
+        current_error: Current error message to match
+        current_approach: Current approach being tried
+        search_learnings_flag: Whether to search learnings.json
+        search_archive_flag: Whether to search archived journals
+        max_results: Maximum total results to return
+
+    Returns:
+        List of HistoricalMatch objects with solutions/lessons
+    """
+    all_matches = []
+
+    # Combine error and approach for comprehensive search
+    combined_query = f"{current_error} {current_approach}".strip()
+
+    if search_learnings_flag and combined_query:
+        learning_matches = search_learnings(combined_query, max_results)
+        all_matches.extend(learning_matches)
+
+    if search_archive_flag:
+        archive_matches = search_archive(
+            error_query=current_error,
+            approach_query=current_approach,
+            max_results=max_results
+        )
+        all_matches.extend(archive_matches)
+
+    # Deduplicate by lesson content
+    seen_lessons = set()
+    unique_matches = []
+    for match in sorted(all_matches, key=lambda m: m.similarity_score, reverse=True):
+        lesson_key = match.lesson_or_resolution[:100]
+        if lesson_key not in seen_lessons:
+            seen_lessons.add(lesson_key)
+            unique_matches.append(match)
+
+    return unique_matches[:max_results]
+
+
+def format_historical_matches(matches: list[HistoricalMatch]) -> str:
+    """
+    Format historical matches for prompt injection.
+
+    Args:
+        matches: List of HistoricalMatch objects
+
+    Returns:
+        Formatted string for prompt injection
+    """
+    if not matches:
+        return ""
+
+    lines = ["## Similar Problems from Past Experience", ""]
+
+    for i, match in enumerate(matches, 1):
+        source_label = "Learning" if match.source == "learnings" else "Past Feature"
+        lines.append(f"### {i}. {source_label} (similarity: {match.similarity_score:.2f})")
+        lines.append(f"**From:** {match.feature_id}")
+        lines.append(f"**Lesson:** {match.lesson_or_resolution}")
+        if match.original_context:
+            lines.append(f"**Context:** {match.original_context[:100]}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # Self-test

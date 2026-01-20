@@ -8,9 +8,10 @@ This prevents "pattern drift" where new code deviates from established conventio
 Saves extracted patterns to specs/context/patterns.md
 
 Usage:
+    /architect scan    # Run from harness shell (recommended)
+
+    # Or directly:
     python harness/archaeologist.py
-    # or via architect.py:
-    python harness/architect.py scan
 """
 
 import json

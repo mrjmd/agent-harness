@@ -194,3 +194,179 @@ Stop execution and report when:
 2. A feature is marked `blocked`
 3. Maximum retry count (5) reached for a single feature
 4. Critical error in test infrastructure
+
+## Harness Development Rules
+
+When modifying the harness codebase itself (files in `harness/`, `bin/`, etc.):
+
+### Mandatory: Update Deployment Scripts When Adding New Files
+
+**BEFORE completing any feature that adds new files to the harness, you MUST update BOTH:**
+
+1. `bin/harness-up` - Updates existing projects
+2. `harness/bootstrap.sh` - Initializes new projects
+
+If you forget either one, users will get import errors or missing functionality.
+
+### Checklist for new harness module:
+
+**Step 1: Update `bin/harness-up`**
+```bash
+# Add to CORE_FILES array
+"harness/coding/my_new_module.py"
+
+# Add to the appropriate rsync command
+"$HARNESS_SOURCE/harness/coding/my_new_module.py" \
+```
+
+**Step 2: Update `harness/bootstrap.sh`**
+```bash
+# Add cp command in the appropriate section
+cp "$HARNESS_ROOT/harness/coding/my_new_module.py" harness/coding/
+```
+
+**Step 3: Verify**
+```bash
+# Test harness-up
+cd /path/to/test/project
+harness-up --dry-run
+# Should show: + harness/coding/my_new_module.py
+
+# Test bootstrap.sh
+./harness/bootstrap.sh /tmp/test-project
+ls /tmp/test-project/harness/coding/my_new_module.py
+# Should exist
+```
+
+### Why this matters
+
+Both scripts use **explicit file lists**, not directory syncing:
+- `harness-up` has a `CORE_FILES` array and individual `rsync` commands
+- `bootstrap.sh` has individual `cp` commands
+
+This is intentional (allows excluding files) but means new files are silently ignored unless explicitly added to both scripts.
+
+### Mandatory: Verify Integration Works
+
+**After modifying harness code, ALWAYS verify the integration actually works:**
+
+1. **Check feature availability flags:**
+   ```bash
+   cd /path/to/project && python -c "
+   import sys
+   from pathlib import Path
+   sys.path.insert(0, str(Path('harness')))
+   sys.path.insert(0, str(Path('harness/coding')))
+   from loop import ATTEMPT_JOURNAL_AVAILABLE, MEMORY_AVAILABLE, REVIEW_BOARD_AVAILABLE
+   print(f'ATTEMPT_JOURNAL_AVAILABLE: {ATTEMPT_JOURNAL_AVAILABLE}')
+   print(f'MEMORY_AVAILABLE: {MEMORY_AVAILABLE}')
+   print(f'REVIEW_BOARD_AVAILABLE: {REVIEW_BOARD_AVAILABLE}')
+   "
+   ```
+
+2. **Run self-tests for new modules:**
+   ```bash
+   cd harness/coding && python attempt_journal.py
+   cd harness/coding && python loop_detector.py
+   ```
+
+3. **Run pytest if tests exist:**
+   ```bash
+   python -m pytest harness/coding/tests/ -v
+   ```
+
+4. **Test the actual user path** - Don't assume imports work just because tests pass. Run `/loop` and verify the feature actually activates.
+
+**Why this matters:** Silent `try/except ImportError` blocks can hide failures. The harness may appear to work but bypass new functionality entirely.
+
+## Working Memory & Loop Detection
+
+The harness includes automatic loop detection for stuck agents:
+
+### How It Works
+- **Attempt journals** stored at `specs/memory/attempts/{feature_id}.json`
+- **Loop detection** analyzes patterns across attempts
+- **Escalation** pauses execution when truly stuck
+
+### Thresholds
+- Same error: 3+ occurrences triggers warning
+- Same approach: 2+ repetitions triggers warning
+- Reviewer ping-pong: 3+ consecutive rejections
+
+### Debugging Loop Detection
+If you're stuck but not seeing loop warnings, check:
+1. `ATTEMPT_JOURNAL_AVAILABLE` is True in the running process
+2. Files exist in `specs/memory/attempts/`
+3. You're claiming completion (recording only happens on `IMPLEMENTATION COMPLETE`)
+4. Loop detection starts checking after iteration 3
+
+## Shell Commands Are the Primary Interface
+
+The file `harness/shell_commands.py` is the **primary user interface** for the harness. All module capabilities should be exposed through shell commands.
+
+### Keeping Commands Aligned with Modules
+
+When a backing module gains new features, the shell command must be updated too:
+
+1. **Check module exports** - Review what functions the module exposes
+2. **Update shell command** - Add handlers for new subcommands/flags
+3. **Update help text** - Both in cmd_help() and in the command's own help
+
+### Current Command → Module Mapping
+
+| Command | Module | Key Functions |
+|---------|--------|---------------|
+| `/architect` | architect.py | cmd_new, cmd_resume, audit_spec, cmd_add_feature, cmd_scan, cmd_smart_start |
+| `/bug` | shell_commands.py | Direct feature entry for bugfixes (no backing module) |
+| `/loop` | coding/loop.py | main, LoopMode.INTERACTIVE, LoopMode.AUTONOMOUS |
+| `/doctor` | doctor.py | cmd_diagnose, cmd_stabilize, cmd_baseline, cmd_qa, cmd_solidify, cmd_guided_flow |
+| `/docs` | docs.py | backfill_docs, cmd_status, cmd_generate |
+| `/memory` | memory.py | read_memory, clear_memory, search_learnings, search_archive |
+
+### Adding a New Shell Command
+
+1. Create the command handler with `@register_command("name", aliases=[...])`
+2. Import the backing module functions
+3. Parse subcommands and flags
+4. Call the appropriate module function
+5. Return user-friendly output
+6. Update cmd_help() with the new command
+
+### Mandatory: Shell Command Maintenance Checklist
+
+When adding or modifying ANY harness command, you MUST complete ALL of these steps:
+
+**Step 1: Register in shell_commands.py**
+```python
+@register_command("mycommand", aliases=["mc"])
+def cmd_mycommand(args: str) -> str:
+    ...
+```
+
+**Step 2: Update cmd_help()**
+Add the command to the main help text in `cmd_help()` (around line 50).
+
+**Step 3: Add embedded help**
+The command should have its own help subcommand that shows detailed usage.
+
+**Step 4: Update CLAUDE.md mapping table**
+Add an entry to the "Current Command → Module Mapping" table above.
+
+**Step 5: Search for old references**
+```bash
+grep -r "python harness/" harness/ README.md
+```
+Replace any references to direct Python invocation with shell command equivalents.
+
+**Why this matters:** The shell commands are the user interface. If `/help` is incomplete or documentation references `python harness/X.py` instead of `/X`, users get confused.
+
+### Testing Shell Commands
+
+After modifying shell commands:
+```bash
+# Test the command runs
+python -c "from harness.shell_commands import handle_slash_command; print(handle_slash_command('/help'))"
+
+# Test specific command
+python -c "from harness.shell_commands import handle_slash_command; print(handle_slash_command('/memory status'))"
+```

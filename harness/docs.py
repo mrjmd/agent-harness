@@ -694,9 +694,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python harness/docs.py backfill     # Generate docs for all passing features
-  python harness/docs.py status       # Show documentation status
-  python harness/docs.py generate auth-001-login  # Generate doc for specific feature
+  /docs backfill     # Generate docs for all passing features (in harness shell)
+  /docs status       # Show documentation status
+  /docs generate auth-001-login  # Generate doc for specific feature
         """
     )
 

@@ -58,6 +58,27 @@ from checkpoint import (
     CheckpointRecord,
 )
 
+# Attempt Journal & Loop Detection
+try:
+    from attempt_journal import (
+        record_attempt,
+        record_review as record_review_exchange,
+        finalize_journal,
+        format_attempt_history,
+        format_review_history,
+        get_loop_state,
+        load_journal,
+    )
+    from loop_detector import (
+        analyze_attempts,
+        get_escalation_level,
+        EscalationLevel,
+        format_loop_warning,
+    )
+    ATTEMPT_JOURNAL_AVAILABLE = True
+except ImportError:
+    ATTEMPT_JOURNAL_AVAILABLE = False
+
 # Review Board (Bicameral Mind)
 try:
     # Import from parent directory
@@ -128,6 +149,59 @@ def sanitize_input(text: str) -> str:
         escaped = delimiter.replace("<", "&lt;").replace(">", "&gt;")
         text = text.replace(delimiter, escaped)
     return text
+
+
+def extract_approach_summary(response_text: str, max_length: int = 200) -> str:
+    """
+    Extract a brief summary of the approach from agent response.
+
+    Looks for key indicators of what the agent is trying to do.
+    """
+    import re
+
+    # Look for common patterns in agent responses
+    patterns = [
+        r"(?:I'll|I will|Let me|Going to)\s+([^.!?\n]+)",
+        r"(?:Adding|Creating|Implementing|Fixing|Updating)\s+([^.!?\n]+)",
+        r"(?:The (?:solution|fix|approach|change) is)\s+([^.!?\n]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, response_text[:1500], re.IGNORECASE)
+        if match:
+            summary = match.group(0)[:max_length]
+            return summary.strip()
+
+    # Fallback: take first substantive line
+    lines = response_text.split('\n')
+    for line in lines[:10]:
+        line = line.strip()
+        if len(line) > 20 and not line.startswith('#'):
+            return line[:max_length]
+
+    return response_text[:max_length] if response_text else ""
+
+
+def check_loop_and_get_context(feature_id: str, iteration: int, max_iterations: int) -> tuple[str, bool]:
+    """
+    Check for loop patterns and return context to inject.
+
+    Returns:
+        Tuple of (context_string, should_pause)
+    """
+    if not ATTEMPT_JOURNAL_AVAILABLE:
+        return "", False
+
+    detection = analyze_attempts(feature_id, max_iterations)
+
+    if not detection.is_looping:
+        return "", False
+
+    escalation = get_escalation_level(detection, iteration, max_iterations)
+
+    should_pause = escalation.value >= EscalationLevel.PAUSE.value
+
+    return detection.context_for_prompt, should_pause
 
 
 @dataclass
@@ -549,7 +623,7 @@ def load_features() -> dict:
     """Load the features backlog from specs/features.json."""
     if not FEATURES_PATH.exists():
         print(f"ERROR: {FEATURES_PATH} not found.")
-        print("Run 'python harness/architect.py new \"your idea\"' first.")
+        print("Run '/architect new \"your idea\"' first.")
         sys.exit(1)
 
     with open(FEATURES_PATH) as f:
@@ -673,12 +747,41 @@ def run_feature_loop(session: FeatureSession) -> bool:
         iteration += 1
         print(f"\n--- Iteration {iteration}/{MAX_ITERATIONS_PER_FEATURE} ---")
 
+        # Check for loop patterns before this iteration
+        loop_context = ""
+        if ATTEMPT_JOURNAL_AVAILABLE and iteration > 3:
+            loop_context, should_pause = check_loop_and_get_context(
+                feature_id, iteration, MAX_ITERATIONS_PER_FEATURE
+            )
+            if loop_context:
+                print("[LOOP DETECTION] Warning injected into context")
+            if should_pause:
+                print("\n[LOOP DETECTION] Escalation triggered - pausing for guidance")
+                print("The agent appears to be stuck. Options:")
+                print("  [c] Continue anyway")
+                print("  [b] Block this feature")
+                print("  [h] Add a hint to help the agent")
+                try:
+                    choice = input("Choice [c/b/h]: ").strip().lower()
+                    if choice == "b":
+                        return False
+                    elif choice == "h":
+                        hint = input("Enter hint for agent: ").strip()
+                        if hint:
+                            loop_context += f"\n\n## Human Hint\n{hint}"
+                except (EOFError, KeyboardInterrupt):
+                    pass
+
         try:
-            # Format the full prompt
+            # Format the full prompt (include loop context if detected)
+            effective_feedback = current_feedback
+            if loop_context:
+                effective_feedback = loop_context + "\n\n" + current_feedback if current_feedback else loop_context
+
             prompt = format_conversation(
                 initial_context,
                 session.conversation_history,
-                current_feedback
+                effective_feedback
             )
 
             # Call Claude CLI
@@ -704,9 +807,31 @@ def run_feature_loop(session: FeatureSession) -> bool:
             if claims_completion(response_text):
                 print("\nAgent claims completion. Running verification...")
 
+                # Extract approach summary for attempt journal
+                approach_summary = extract_approach_summary(response_text)
+
                 # EXTERNAL VERIFICATION - harness runs the test
                 verification = verify_feature(feature, response_text)
                 record.verification_result = verification.reason
+
+                # Record this attempt in the journal
+                if ATTEMPT_JOURNAL_AVAILABLE:
+                    try:
+                        modified_files = get_modified_files()
+                    except Exception:
+                        modified_files = []
+
+                    record_attempt(
+                        feature_id=feature_id,
+                        attempt_num=iteration,
+                        approach_summary=approach_summary,
+                        files_modified=modified_files,
+                        claimed_complete=True,
+                        verification_passed=verification.passed,
+                        error_output=verification.stderr if hasattr(verification, 'stderr') else verification.reason,
+                        failed_tests=verification.failed_tests if hasattr(verification, 'failed_tests') else []
+                    )
+                    print(f"  [Attempt Journal] Recorded attempt #{iteration} (passed={verification.passed})")
 
                 if verification.passed:
                     print("✓ Feature test passes!")
@@ -800,6 +925,18 @@ Modify your code to comply with the existing codebase conventions."""
                                 output=diff_content
                             )
 
+                            # Record review exchange in attempt journal
+                            if ATTEMPT_JOURNAL_AVAILABLE:
+                                record_review_exchange(
+                                    feature_id=feature_id,
+                                    attempt_num=iteration,
+                                    reviewer=result.reviewer if hasattr(result, 'reviewer') else "unknown",
+                                    submission_summary=approach_summary if 'approach_summary' in dir() else "",
+                                    approved=result.approved,
+                                    feedback_summary=result.feedback[:300] if result.feedback else "",
+                                    concerns=result.concerns if hasattr(result, 'concerns') else []
+                                )
+
                             if not result.approved:
                                 print("\n[REVIEW BOARD] Review rejected. Addressing feedback...")
                                 current_feedback = f"""REVIEWER VETO:
@@ -826,6 +963,10 @@ Make the necessary changes and ensure they pass verification again."""
                         if MEMORY_AVAILABLE:
                             update_understanding("coding_loop", "feature_status", "passing")
                             update_understanding("coding_loop", f"feature_{feature_id}_iterations", str(iteration))
+
+                        # Finalize attempt journal
+                        if ATTEMPT_JOURNAL_AVAILABLE:
+                            finalize_journal(feature_id, "passing")
 
                         return True
                     else:
@@ -883,6 +1024,11 @@ Make the necessary changes and ensure they pass verification again."""
             current_feedback = f"Error occurred: {e}\nPlease try again."
 
     print(f"\nMax iterations ({MAX_ITERATIONS_PER_FEATURE}) reached for {feature_id}")
+
+    # Finalize attempt journal as exhausted
+    if ATTEMPT_JOURNAL_AVAILABLE:
+        finalize_journal(feature_id, "exhausted")
+
     return False
 
 
@@ -966,12 +1112,12 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python harness/coding/loop.py                    # Auto-detect mode from TTY
-  python harness/coding/loop.py --interactive      # Always pause at checkpoints
-  python harness/coding/loop.py --autonomous       # Never pause, auto-fix critical
-  python harness/coding/loop.py -a                 # Short form for autonomous
-  python harness/coding/loop.py --cadence 3        # Checkpoint every 3 features
-  python harness/coding/loop.py -a --cadence 10    # Autonomous, every 10 features
+  /loop                    # Auto-detect mode from TTY (in harness shell)
+  /loop --interactive      # Always pause at checkpoints
+  /loop --autonomous       # Never pause, auto-fix critical
+  /loop -a                 # Short form for autonomous
+  /loop --cadence 3        # Checkpoint every 3 features
+  /loop -a --cadence 10    # Autonomous, every 10 features
         """
     )
 
@@ -1018,6 +1164,13 @@ def main():
     print(f"Mode: {mode.value.upper()}")
     print(f"Checkpoint cadence: every {cadence} features")
     print("=" * 60)
+
+    # Show feature availability
+    print("\nFeatures:")
+    print(f"  Attempt Journal: {'ENABLED' if ATTEMPT_JOURNAL_AVAILABLE else 'DISABLED'}")
+    print(f"  Loop Detection:  {'ENABLED' if ATTEMPT_JOURNAL_AVAILABLE else 'DISABLED'}")
+    print(f"  Working Memory:  {'ENABLED' if MEMORY_AVAILABLE else 'DISABLED'}")
+    print(f"  Review Board:    {'ENABLED' if REVIEW_BOARD_AVAILABLE else 'DISABLED'}")
 
     # Pre-flight dependency checks
     print("\nPre-flight checks...")

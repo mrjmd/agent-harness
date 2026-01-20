@@ -15,6 +15,18 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Optional
 
+# Attempt Journal for context injection
+try:
+    from attempt_journal import (
+        format_attempt_history,
+        format_review_history,
+        get_loop_state,
+    )
+    from loop_detector import analyze_attempts
+    ATTEMPT_JOURNAL_AVAILABLE = True
+except ImportError:
+    ATTEMPT_JOURNAL_AVAILABLE = False
+
 
 # File patterns to include in the map
 CODE_PATTERNS = [
@@ -322,10 +334,68 @@ DO NOT introduce new libraries, patterns, or conventions.
             sections.append("\n# LESSONS FROM PREVIOUS FEATURES")
             sections.append(learnings)
 
+    # 5. Attempt History (adaptive - more when stuck)
+    feature_id = feature.get("id", "")
+    if feature_id and ATTEMPT_JOURNAL_AVAILABLE:
+        attempt_context = build_attempt_context(feature_id)
+        if attempt_context:
+            sections.append("\n# PREVIOUS ATTEMPTS (THIS FEATURE)")
+            sections.append(attempt_context)
+
     sections.append("\n---")
     sections.append("\nBegin working on this feature. Write the test first, then implement.")
 
     return "\n".join(sections)
+
+
+def build_attempt_context(feature_id: str, max_iterations: int = 20) -> str:
+    """
+    Build adaptive attempt context for prompt injection.
+
+    Normally returns minimal context (last 3 attempts).
+    When loops are detected, returns full history + loop warning.
+
+    Args:
+        feature_id: The feature being worked on
+        max_iterations: Maximum allowed iterations
+
+    Returns:
+        Formatted string for prompt injection
+    """
+    if not ATTEMPT_JOURNAL_AVAILABLE:
+        return ""
+
+    # Check for loop patterns
+    detection = analyze_attempts(feature_id, max_iterations)
+
+    sections = []
+
+    if detection.is_looping:
+        # Full context when looping - include more attempts and all reviews
+        attempt_history = format_attempt_history(
+            feature_id,
+            max_attempts=10,  # More context when stuck
+            include_full_errors=True
+        )
+        if attempt_history:
+            sections.append(attempt_history)
+
+        review_history = format_review_history(feature_id)
+        if review_history:
+            sections.append(review_history)
+
+        # Loop warning is handled separately in loop.py
+    else:
+        # Minimal context when not looping
+        attempt_history = format_attempt_history(
+            feature_id,
+            max_attempts=3,
+            include_full_errors=False
+        )
+        if attempt_history:
+            sections.append(attempt_history)
+
+    return "\n\n".join(sections) if sections else ""
 
 
 def load_relevant_learnings(learnings_path: Path, feature: dict, max_items: int = 10) -> str:

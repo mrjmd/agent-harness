@@ -17,7 +17,7 @@ ENABLING/DISABLING:
     To disable (even if config says enabled):
         export REVIEW_BOARD_ENABLED=0
 
-CLI Usage:
+CLI Usage (internal - typically called automatically by harness):
     python harness/review_board.py check architect       # Check if review needed
     python harness/review_board.py check implementer f1  # Check with file list
     python harness/review_board.py packet architect      # Generate review packet

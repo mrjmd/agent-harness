@@ -33,8 +33,8 @@ claude login
 ```bash
 mkdir my-new-app && cd my-new-app
 harness-init .
-python3 harness/architect.py new "Build a todo app with auth"
-python3 harness/coding/loop.py
+harness shell    # Then use: /architect new "Build a todo app with auth"
+                 # When ready: /loop
 ```
 
 ### For Existing Projects (Brownfield)
@@ -44,13 +44,16 @@ python3 harness/coding/loop.py
 harness-init /path/to/existing-project
 cd /path/to/existing-project
 
-# 2. Health check FIRST (before architect)
-python3 harness/doctor.py diagnose
-python3 harness/doctor.py stabilize  # Fix critical issues
+# 2. Start the harness shell
+harness shell
 
-# 3. THEN run architect
-python3 harness/architect.py new "Add feature X to existing app"
-python3 harness/coding/loop.py
+# 3. Health check FIRST (before architect)
+/doctor diagnose
+/doctor stabilize    # Fix critical issues
+
+# 4. THEN run architect
+/architect new "Add feature X to existing app"
+/loop
 ```
 
 > **Note:** Both phases use the `claude` CLI for LLM calls. Authentication is handled via `claude login`.
@@ -100,14 +103,21 @@ TDD implementation with external verification.
 
 ## Commands
 
+All commands are run from the harness shell (`harness shell`):
+
 | Command | Purpose |
 |---------|---------|
-| `python harness/architect.py new "idea"` | Start new specification session |
-| `python harness/architect.py resume` | Continue existing specification |
-| `python harness/architect.py audit` | Check specification completeness |
-| `python harness/architect.py add-feature "desc"` | Add feature to existing spec |
-| `python harness/architect.py scan` | Extract patterns from existing codebase |
-| `python harness/coding/loop.py` | Run the coding loop |
+| `/architect new "idea"` | Start new specification session |
+| `/architect resume` | Continue existing specification |
+| `/architect audit` | Check specification completeness |
+| `/architect add-feature "desc"` | Add feature to existing spec |
+| `/architect scan` | Extract patterns from existing codebase |
+| `/loop` | Run the coding loop |
+| `/doctor` | Health diagnostics and guided stabilization |
+| `/bug "desc"` | Quick bugfix entry (bypasses architect) |
+| `/docs` | Documentation generation |
+| `/memory` | Working memory management |
+| `/help` | Show all available commands |
 
 ## Key Files
 
@@ -367,7 +377,7 @@ When working in an existing codebase, the harness extracts and enforces patterns
 Run manually or auto-triggered when starting `architect.py new` in a folder with existing code:
 
 ```bash
-python harness/architect.py scan
+/architect scan
 ```
 
 This analyzes:
@@ -405,16 +415,18 @@ Test passes → Pattern check → Regression check → Commit
 ```bash
 # Existing project - patterns extracted automatically
 cd existing-project
-python harness/architect.py new "Add user preferences"
+harness shell   # Start the harness shell
+
+/architect new "Add user preferences"
 # → Detects src/ or package.json
 # → Runs archaeologist.py automatically
 # → specs/context/patterns.md created
 
 # Manual extraction
-python harness/architect.py scan
+/architect scan
 
 # Coding loop enforces patterns
-python harness/coding/loop.py
+/loop
 # → Pattern violations block commits
 # → Agent must fix before proceeding
 ```

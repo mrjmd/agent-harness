@@ -64,15 +64,26 @@ mkdir -p .claude harness/coding harness/templates harness/reviewers specs specs/
 cp -r "$HARNESS_ROOT/.claude/"* .claude/ 2>/dev/null || true
 log_success "Copied .claude/"
 
+# Copy core harness files (shell, CLI, main entry point)
+cp "$HARNESS_ROOT/harness/__main__.py" harness/
+cp "$HARNESS_ROOT/harness/cli.py" harness/
+cp "$HARNESS_ROOT/harness/shell.py" harness/
+cp "$HARNESS_ROOT/harness/shell_commands.py" harness/
+cp "$HARNESS_ROOT/harness/shell_context.py" harness/
+cp "$HARNESS_ROOT/harness/docs.py" harness/
+log_success "Copied harness core (shell, CLI, __main__)"
+
 # Copy architect (specification harness)
 cp "$HARNESS_ROOT/harness/architect.py" harness/
 cp "$HARNESS_ROOT/harness/archaeologist.py" harness/
 cp "$HARNESS_ROOT/harness/doctor.py" harness/
+cp "$HARNESS_ROOT/harness/understanding.py" harness/
 cp "$HARNESS_ROOT/harness/review_board.py" harness/
 cp "$HARNESS_ROOT/harness/memory.py" harness/
 log_success "Copied harness/architect.py"
 log_success "Copied harness/archaeologist.py"
 log_success "Copied harness/doctor.py"
+log_success "Copied harness/understanding.py"
 log_success "Copied harness/review_board.py"
 log_success "Copied harness/memory.py"
 
@@ -87,6 +98,9 @@ cp "$HARNESS_ROOT/harness/coding/git_utils.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/repo_map.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/reflection.py" harness/coding/
 cp "$HARNESS_ROOT/harness/coding/review.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/checkpoint.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/attempt_journal.py" harness/coding/
+cp "$HARNESS_ROOT/harness/coding/loop_detector.py" harness/coding/
 cp -r "$HARNESS_ROOT/harness/templates/"* harness/templates/ 2>/dev/null || true
 log_success "Copied harness/coding/"
 

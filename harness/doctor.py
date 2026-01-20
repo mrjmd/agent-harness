@@ -52,6 +52,11 @@ HEALTH_REPORT_PATH = SPECS_DIR / "health_report.md"
 TEST_STRATEGY_PATH = SPECS_DIR / "test_strategy.md"
 MANUAL_QA_PATH = SPECS_DIR / "manual_qa_plan.md"
 FEATURES_PATH = SPECS_DIR / "features.json"
+KNOWN_ISSUES_PATH = SPECS_DIR / "known_issues.json"
+DOCTOR_STATE_PATH = SPECS_DIR / "doctor_state.json"
+
+# Phase ordering for guided flow
+PHASE_ORDER = ["assess", "verify", "protect", "coverage", "fix"]
 
 # Health thresholds
 HEALTH_THRESHOLDS = {
@@ -275,6 +280,112 @@ class ExternalServiceDetection:
 
 
 @dataclass
+class KnownIssueValidation:
+    """Validation result for a known issue."""
+    still_present: bool
+    verified_at: str
+    notes: str = ""
+
+
+@dataclass
+class KnownIssue:
+    """A known issue discovered from docs or code annotations."""
+    id: str
+    source: str  # File:line where issue was found
+    source_type: str  # "documentation" or "annotation"
+    raw_text: str  # Original text describing the issue
+    category: str  # "bug", "technical_debt", "security", "performance", "deprecation"
+    severity: str  # "critical", "high", "medium", "low"
+    status: str  # "unvalidated", "validated", "potentially_resolved", "resolved"
+    validation: Optional[KnownIssueValidation] = None
+    related_code: list = field(default_factory=list)  # Files that might be affected
+    related_annotations: list = field(default_factory=list)  # Cross-referenced annotations
+    discovered_at: str = ""
+    last_validated: str = ""
+
+    def __post_init__(self):
+        if not self.discovered_at:
+            self.discovered_at = datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class KnownIssuesRegistry:
+    """Registry of all known issues in the project."""
+    issues: list = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+    last_scan: str = ""
+
+    def add_issue(self, issue: KnownIssue) -> None:
+        """Add an issue to the registry, avoiding duplicates."""
+        # Check for duplicates by source
+        for existing in self.issues:
+            if existing.source == issue.source and existing.raw_text[:50] == issue.raw_text[:50]:
+                return  # Duplicate, skip
+        self.issues.append(issue)
+
+    def update_summary(self) -> None:
+        """Update the summary statistics."""
+        self.summary = {
+            "total": len(self.issues),
+            "by_severity": {
+                "critical": sum(1 for i in self.issues if i.severity == "critical"),
+                "high": sum(1 for i in self.issues if i.severity == "high"),
+                "medium": sum(1 for i in self.issues if i.severity == "medium"),
+                "low": sum(1 for i in self.issues if i.severity == "low"),
+            },
+            "by_status": {
+                "validated": sum(1 for i in self.issues if i.status == "validated"),
+                "unvalidated": sum(1 for i in self.issues if i.status == "unvalidated"),
+                "potentially_resolved": sum(1 for i in self.issues if i.status == "potentially_resolved"),
+                "resolved": sum(1 for i in self.issues if i.status == "resolved"),
+            },
+            "by_category": {
+                "bug": sum(1 for i in self.issues if i.category == "bug"),
+                "technical_debt": sum(1 for i in self.issues if i.category == "technical_debt"),
+                "security": sum(1 for i in self.issues if i.category == "security"),
+                "performance": sum(1 for i in self.issues if i.category == "performance"),
+                "deprecation": sum(1 for i in self.issues if i.category == "deprecation"),
+            }
+        }
+        self.last_scan = datetime.now(timezone.utc).isoformat()
+
+    def save(self) -> None:
+        """Save registry to specs/known_issues.json."""
+        SPECS_DIR.mkdir(parents=True, exist_ok=True)
+        self.update_summary()
+        data = {
+            "issues": [asdict(i) for i in self.issues],
+            "summary": self.summary,
+            "last_scan": self.last_scan,
+        }
+        KNOWN_ISSUES_PATH.write_text(json.dumps(data, indent=2))
+
+    @classmethod
+    def load(cls) -> "KnownIssuesRegistry":
+        """Load registry from specs/known_issues.json."""
+        if not KNOWN_ISSUES_PATH.exists():
+            return cls()
+        try:
+            data = json.loads(KNOWN_ISSUES_PATH.read_text())
+            registry = cls(
+                summary=data.get("summary", {}),
+                last_scan=data.get("last_scan", ""),
+            )
+            for issue_data in data.get("issues", []):
+                # Handle validation field
+                validation_data = issue_data.pop("validation", None)
+                validation = None
+                if validation_data and isinstance(validation_data, dict):
+                    validation = KnownIssueValidation(**validation_data)
+                issue_data["validation"] = validation
+                registry.issues.append(KnownIssue(**issue_data))
+            return registry
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            print(f"Warning: Could not load known issues registry: {e}")
+            return cls()
+
+
+@dataclass
 class HealthReport:
     status: HealthStatus
     project_type: ProjectType
@@ -303,6 +414,159 @@ class HealthReport:
 
     # Recommendations
     recommendations: list = field(default_factory=list)
+
+
+@dataclass
+class DoctorPhase:
+    """State tracking for a single phase in the doctor flow."""
+    completed: bool = False
+    completed_at: str = ""
+    status: str = ""  # For assess phase: HEALTHY/DRIFTING/CRITICAL
+    routes_verified: int = 0  # For verify phase
+    routes_total: int = 0
+    tests_generated: int = 0  # For protect phase
+    tasks_generated: int = 0  # For fix phase
+    skipped: bool = False
+    skip_reason: str = ""
+
+
+@dataclass
+class DoctorState:
+    """
+    Tracks progress through the doctor guided workflow phases.
+
+    Phases: assess -> verify -> protect -> coverage -> fix -> complete
+    """
+    current_phase: str = "assess"
+    started_at: str = ""
+    phases: dict = field(default_factory=lambda: {
+        "assess": DoctorPhase(),
+        "verify": DoctorPhase(),
+        "protect": DoctorPhase(),
+        "coverage": DoctorPhase(),
+        "fix": DoctorPhase(),
+    })
+
+    def __post_init__(self):
+        if not self.started_at:
+            self.started_at = datetime.now(timezone.utc).isoformat()
+        # Convert dict phases back to DoctorPhase objects if loaded from JSON
+        if self.phases and isinstance(list(self.phases.values())[0], dict):
+            self.phases = {
+                name: DoctorPhase(**data) for name, data in self.phases.items()
+            }
+
+    def save(self) -> None:
+        """Save state to specs/doctor_state.json."""
+        SPECS_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "current_phase": self.current_phase,
+            "started_at": self.started_at,
+            "phases": {name: asdict(phase) for name, phase in self.phases.items()},
+        }
+        DOCTOR_STATE_PATH.write_text(json.dumps(data, indent=2))
+
+    @classmethod
+    def load(cls) -> Optional["DoctorState"]:
+        """Load state from specs/doctor_state.json, or None if not exists."""
+        if not DOCTOR_STATE_PATH.exists():
+            return None
+        try:
+            data = json.loads(DOCTOR_STATE_PATH.read_text())
+            return cls(
+                current_phase=data.get("current_phase", "assess"),
+                started_at=data.get("started_at", ""),
+                phases=data.get("phases", {}),
+            )
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            print(f"Warning: Could not load doctor state: {e}")
+            return None
+
+    def mark_phase_complete(self, phase: str, **kwargs) -> None:
+        """Mark a phase as completed with optional metadata."""
+        if phase in self.phases:
+            self.phases[phase].completed = True
+            self.phases[phase].completed_at = datetime.now(timezone.utc).isoformat()
+            for key, value in kwargs.items():
+                if hasattr(self.phases[phase], key):
+                    setattr(self.phases[phase], key, value)
+            # Advance to next phase
+            idx = PHASE_ORDER.index(phase)
+            if idx + 1 < len(PHASE_ORDER):
+                self.current_phase = PHASE_ORDER[idx + 1]
+            else:
+                self.current_phase = "complete"
+            self.save()
+
+    def skip_phase(self, phase: str, reason: str) -> None:
+        """Skip a phase with a reason."""
+        if phase in self.phases:
+            self.phases[phase].skipped = True
+            self.phases[phase].skip_reason = reason
+            self.phases[phase].completed = True
+            self.phases[phase].completed_at = datetime.now(timezone.utc).isoformat()
+            # Advance to next phase
+            idx = PHASE_ORDER.index(phase)
+            if idx + 1 < len(PHASE_ORDER):
+                self.current_phase = PHASE_ORDER[idx + 1]
+            else:
+                self.current_phase = "complete"
+            self.save()
+
+    def is_complete(self) -> bool:
+        """Check if all phases are done."""
+        return self.current_phase == "complete"
+
+
+def get_phase_display_name(phase: str) -> str:
+    """Get human-readable name for a phase."""
+    names = {
+        "assess": "ASSESS (Health Audit)",
+        "verify": "VERIFY (Manual QA)",
+        "protect": "PROTECT (Baseline Tests)",
+        "coverage": "COVERAGE (Test Strategy)",
+        "fix": "FIX (Stabilization Tasks)",
+        "complete": "COMPLETE",
+    }
+    return names.get(phase, phase.upper())
+
+
+def can_skip_phase(phase: str, state: DoctorState) -> tuple[bool, str]:
+    """
+    Check if a phase can be skipped and provide the reason.
+
+    Returns (can_skip, reason_message).
+    """
+    if phase == "verify":
+        # Check if we have good test coverage
+        if HEALTH_REPORT_PATH.exists():
+            content = HEALTH_REPORT_PATH.read_text()
+            # Look for test pass rate info
+            if "Pass Rate: 100%" in content or "Pass Rate: 9" in content:
+                # 90%+ pass rate
+                return True, "High test coverage detected - verification via existing tests"
+        return False, "Low or unknown test coverage - manual verification recommended"
+
+    if phase == "protect":
+        # Can skip if baseline tests already exist
+        baseline_path = Path("tests/e2e/baseline_verified.spec.ts")
+        if baseline_path.exists():
+            return True, "Baseline tests already exist"
+        return False, "No baseline tests - protection recommended before making changes"
+
+    if phase == "coverage":
+        # Coverage planning is optional
+        return True, "Test strategy planning is optional"
+
+    if phase == "fix":
+        # Check if project is healthy
+        if HEALTH_REPORT_PATH.exists():
+            content = HEALTH_REPORT_PATH.read_text()
+            if "## Status: HEALTHY" in content:
+                return True, "Project is healthy - no stabilization needed"
+        return False, "Issues detected that should be addressed"
+
+    return False, ""
 
 
 # =============================================================================
@@ -921,6 +1185,392 @@ def scan_code_annotations() -> list[AnnotationMatch]:
                 pass
 
     return annotations
+
+
+# =============================================================================
+# Known Issues Registry
+# =============================================================================
+
+def _categorize_issue(text: str, pattern: str) -> tuple[str, str]:
+    """
+    Categorize an issue based on its text and source pattern.
+
+    Returns:
+        Tuple of (category, severity)
+    """
+    text_lower = text.lower()
+
+    # Security-related keywords
+    security_keywords = ["security", "auth", "password", "token", "csrf", "xss", "injection", "vulnerability"]
+    if any(kw in text_lower for kw in security_keywords) or pattern == "SECURITY":
+        return ("security", "critical")
+
+    # Bug-related patterns
+    if pattern in ("FIXME", "BUG", "BROKEN"):
+        return ("bug", "high")
+
+    # Known/broken issues from docs
+    if "known issue" in text_lower or "broken" in text_lower or "not working" in text_lower:
+        return ("bug", "high")
+
+    # Performance
+    if "slow" in text_lower or "performance" in text_lower or "optimize" in text_lower or pattern == "OPTIMIZE":
+        return ("performance", "medium")
+
+    # Deprecation
+    if "deprecated" in text_lower or pattern == "@deprecated":
+        return ("deprecation", "medium")
+
+    # Technical debt (HACK, TODO, KLUDGE, etc.)
+    if pattern in ("HACK", "KLUDGE", "XXX", "REFACTOR"):
+        return ("technical_debt", "high")
+
+    if pattern == "TODO":
+        return ("technical_debt", "medium")
+
+    if pattern == "NOTE" or pattern == "WARNING":
+        return ("technical_debt", "low")
+
+    # Default
+    return ("technical_debt", "medium")
+
+
+def _find_related_code(issue_text: str, source_file: str) -> list[str]:
+    """
+    Find code files that might be related to an issue.
+
+    Searches for file references, class names, and function names mentioned in the issue.
+    """
+    related = []
+
+    # Extract file paths mentioned in the text (e.g., "src/auth/cookies.ts")
+    file_refs = re.findall(r'[\w/]+\.(?:ts|tsx|js|jsx|py|go|rs|java|rb)', issue_text)
+    for ref in file_refs:
+        if Path(ref).exists():
+            related.append(ref)
+
+    # If source is a code file, add its directory as potentially related
+    source_path = Path(source_file.split(":")[0])
+    if source_path.suffix in [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".rb"]:
+        related.append(str(source_path))
+
+    # Extract potential identifiers (PascalCase or snake_case names)
+    identifiers = re.findall(r'\b([A-Z][a-zA-Z]+|[a-z]+_[a-z_]+)\b', issue_text)
+    skip_dirs = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "harness"}
+    extensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".rb"]
+
+    for ident in identifiers[:5]:  # Limit to avoid excessive searching
+        for ext in extensions:
+            for file_path in Path(".").rglob(f"*{ext}"):
+                if any(skip in file_path.parts for skip in skip_dirs):
+                    continue
+                try:
+                    content = file_path.read_text(errors="ignore")
+                    if ident in content and str(file_path) not in related:
+                        related.append(str(file_path))
+                        break
+                except IOError:
+                    pass
+
+    return list(set(related))[:10]  # Dedupe and limit
+
+
+def _cross_reference_issues(
+    doc_issues: list[DocumentedIssue],
+    annotations: list[AnnotationMatch]
+) -> dict[str, list[str]]:
+    """
+    Cross-reference documented issues with code annotations.
+
+    Returns:
+        Dict mapping doc issue source to list of related annotation sources
+    """
+    cross_refs = {}
+
+    for doc_issue in doc_issues:
+        related_annotations = []
+        doc_text_lower = doc_issue.issue.lower()
+
+        # Extract keywords from the doc issue
+        doc_words = set(re.findall(r'\b[a-z]{4,}\b', doc_text_lower))
+
+        for ann in annotations:
+            ann_text_lower = ann.text.lower()
+            ann_words = set(re.findall(r'\b[a-z]{4,}\b', ann_text_lower))
+
+            # Check for word overlap
+            overlap = len(doc_words & ann_words)
+            if overlap >= 2:  # At least 2 common words
+                related_annotations.append(f"{ann.pattern} at {ann.file}:{ann.line}")
+
+        if related_annotations:
+            cross_refs[doc_issue.source] = related_annotations
+
+    return cross_refs
+
+
+def scan_and_register_issues() -> KnownIssuesRegistry:
+    """
+    Scan the codebase for known issues and register them.
+
+    This combines documentation scanning and code annotation scanning,
+    then cross-references them to build a comprehensive issue registry.
+
+    Returns:
+        KnownIssuesRegistry with all discovered issues
+    """
+    registry = KnownIssuesRegistry()
+    issue_counter = 1
+
+    print("  Scanning for known issues...")
+
+    # Scan documentation for issues
+    doc_issues = scan_documentation()
+    print(f"    -> {len(doc_issues)} documented issues found")
+
+    # Scan code annotations
+    annotations = scan_code_annotations()
+    print(f"    -> {len(annotations)} code annotations found")
+
+    # Cross-reference
+    cross_refs = _cross_reference_issues(doc_issues, annotations)
+    print(f"    -> {len(cross_refs)} cross-references found")
+
+    # Register documented issues
+    for doc_issue in doc_issues:
+        category, severity = _categorize_issue(doc_issue.issue, "")
+        # Override severity from doc_issue if set
+        if doc_issue.severity == "critical":
+            severity = "critical"
+        elif doc_issue.severity == "high" and severity not in ["critical"]:
+            severity = "high"
+
+        issue = KnownIssue(
+            id=f"ki-{issue_counter:03d}",
+            source=doc_issue.source,
+            source_type="documentation",
+            raw_text=doc_issue.issue,
+            category=category,
+            severity=severity,
+            status="unvalidated",
+            related_code=_find_related_code(doc_issue.issue, doc_issue.source),
+            related_annotations=cross_refs.get(doc_issue.source, []),
+        )
+        registry.add_issue(issue)
+        issue_counter += 1
+
+    # Register code annotations as issues (prioritize critical ones)
+    critical_patterns = {"SECURITY", "FIXME", "BUG", "BROKEN", "HACK", "XXX", "DANGER"}
+    for ann in annotations:
+        if ann.pattern in critical_patterns or ann.priority in ["critical", "high"]:
+            category, severity = _categorize_issue(ann.text, ann.pattern)
+
+            issue = KnownIssue(
+                id=f"ki-{issue_counter:03d}",
+                source=f"{ann.file}:{ann.line}",
+                source_type="annotation",
+                raw_text=ann.text,
+                category=category,
+                severity=severity,
+                status="unvalidated",
+                related_code=[ann.file],
+            )
+            registry.add_issue(issue)
+            issue_counter += 1
+
+    registry.update_summary()
+    print(f"    -> {len(registry.issues)} total issues registered")
+
+    return registry
+
+
+def validate_issues_with_tests(registry: KnownIssuesRegistry) -> KnownIssuesRegistry:
+    """
+    Validate known issues by running related tests.
+
+    For each issue:
+    - Find tests related to the affected code
+    - Run those tests
+    - Mark as "validated" if tests fail
+    - Mark as "potentially_resolved" if tests pass
+
+    Args:
+        registry: The issues registry to validate
+
+    Returns:
+        Updated registry with validation status
+    """
+    if not registry.issues:
+        return registry
+
+    print("  Validating issues with tests...")
+
+    # Get list of all test files
+    test_files = []
+    for pattern in ["tests/**/*.py", "tests/**/*.ts", "tests/**/*.spec.ts", "test/**/*.py", "test/**/*.ts"]:
+        test_files.extend([str(f) for f in Path(".").glob(pattern)])
+
+    if not test_files:
+        print("    -> No test files found, skipping validation")
+        return registry
+
+    # Map code files to test files
+    code_to_tests = {}
+    for test_file in test_files:
+        test_path = Path(test_file)
+        test_name = test_path.stem.replace("test_", "").replace("_test", "").replace(".spec", "")
+
+        # Match test file to source file
+        for ext in [".ts", ".tsx", ".js", ".jsx", ".py"]:
+            potential_sources = [
+                f"src/{test_name}{ext}",
+                f"src/**/{test_name}{ext}",
+                f"app/{test_name}{ext}",
+                f"app/**/{test_name}{ext}",
+            ]
+            for pattern in potential_sources:
+                for src in Path(".").glob(pattern):
+                    code_to_tests.setdefault(str(src), []).append(test_file)
+
+    validated_count = 0
+    resolved_count = 0
+
+    for issue in registry.issues:
+        # Find tests related to this issue
+        related_tests = []
+        for code_file in issue.related_code:
+            if code_file in code_to_tests:
+                related_tests.extend(code_to_tests[code_file])
+
+        if not related_tests:
+            continue
+
+        # Run the related tests
+        related_tests = list(set(related_tests))[:5]  # Limit to 5 tests
+
+        # Detect test framework and run
+        all_passed = True
+        for test_file in related_tests:
+            if test_file.endswith(".py"):
+                code, stdout, stderr = run_shell(["pytest", test_file, "-v", "--tb=short"], timeout=60)
+            elif test_file.endswith(".ts") or test_file.endswith(".spec.ts"):
+                code, stdout, stderr = run_shell(["npx", "playwright", "test", test_file], timeout=120)
+            else:
+                continue
+
+            if code != 0:
+                all_passed = False
+                break
+
+        # Update validation status
+        now = datetime.now(timezone.utc).isoformat()
+        if all_passed:
+            issue.status = "potentially_resolved"
+            issue.validation = KnownIssueValidation(
+                still_present=False,
+                verified_at=now,
+                notes=f"Related tests pass: {', '.join(related_tests[:3])}"
+            )
+            resolved_count += 1
+        else:
+            issue.status = "validated"
+            issue.validation = KnownIssueValidation(
+                still_present=True,
+                verified_at=now,
+                notes=f"Related tests fail: {', '.join(related_tests[:3])}"
+            )
+            validated_count += 1
+
+        issue.last_validated = now
+
+    print(f"    -> {validated_count} issues validated (confirmed), {resolved_count} potentially resolved")
+
+    registry.update_summary()
+    return registry
+
+
+def store_issues_in_memory(registry: KnownIssuesRegistry) -> None:
+    """
+    Store validated issues in working memory for architect/loop access.
+
+    This makes the issues available to other components without them
+    needing to parse the full registry.
+    """
+    if not MEMORY_AVAILABLE:
+        return
+
+    # Store high-level summary
+    update_understanding("doctor", "known_issues_total", str(registry.summary.get("total", 0)))
+    update_understanding("doctor", "known_issues_critical", str(registry.summary.get("by_severity", {}).get("critical", 0)))
+    update_understanding("doctor", "known_issues_high", str(registry.summary.get("by_severity", {}).get("high", 0)))
+
+    # Store high-priority issue summaries
+    high_priority = [i for i in registry.issues if i.severity in ("critical", "high")][:5]
+    if high_priority:
+        issue_summaries = "; ".join([
+            f"[{i.id}] {i.category}: {i.raw_text[:60]}..."
+            for i in high_priority
+        ])
+        update_understanding("doctor", "high_priority_issues", issue_summaries)
+
+    # Store areas of concern (directories with most issues)
+    areas = {}
+    for issue in registry.issues:
+        for code_file in issue.related_code:
+            parts = Path(code_file).parts
+            if len(parts) >= 2:
+                area = f"{parts[0]}/{parts[1]}"
+            elif len(parts) == 1:
+                area = parts[0]
+            else:
+                continue
+            areas[area] = areas.get(area, 0) + 1
+
+    top_areas = sorted(areas.items(), key=lambda x: x[1], reverse=True)[:5]
+    if top_areas:
+        update_understanding("doctor", "areas_of_concern", ", ".join([a[0] for a in top_areas]))
+
+
+def cmd_issues() -> int:
+    """Scan for known issues and create the registry."""
+    print("Scanning for known issues...")
+    print("")
+
+    # Scan and register
+    registry = scan_and_register_issues()
+
+    # Optionally validate with tests
+    if registry.issues and (Path("pytest.ini").exists() or Path("playwright.config.ts").exists()):
+        print("")
+        response = input("Run tests to validate issues? (y/N): ").strip().lower()
+        if response == "y":
+            registry = validate_issues_with_tests(registry)
+
+    # Save registry
+    registry.save()
+    print(f"\nKnown issues registry saved to {KNOWN_ISSUES_PATH}")
+
+    # Store in memory
+    if MEMORY_AVAILABLE:
+        store_issues_in_memory(registry)
+        print("High-priority issues stored in working memory")
+
+    # Display summary
+    print("\n" + "=" * 50)
+    print("KNOWN ISSUES SUMMARY")
+    print("=" * 50)
+    print(f"Total issues: {registry.summary.get('total', 0)}")
+    print(f"\nBy severity:")
+    for sev, count in registry.summary.get("by_severity", {}).items():
+        if count > 0:
+            print(f"  {sev}: {count}")
+    print(f"\nBy status:")
+    for status, count in registry.summary.get("by_status", {}).items():
+        if count > 0:
+            print(f"  {status}: {count}")
+    print("")
+
+    return 0
 
 
 # =============================================================================
@@ -1638,6 +2288,12 @@ def cmd_diagnose() -> int:
     routes = discover_routes()
     print(f"    -> {len(routes)} routes found")
 
+    # Scan and register known issues
+    print("  Registering known issues...")
+    issues_registry = scan_and_register_issues()
+    issues_registry.save()
+    print(f"    -> Saved to {KNOWN_ISSUES_PATH}")
+
     # Build report
     report = HealthReport(
         status=HealthStatus.HEALTHY,  # Will be recalculated
@@ -1680,9 +2336,12 @@ def cmd_diagnose() -> int:
         update_understanding("doctor", "external_services", ", ".join(s.name for s in external_services) if external_services else "none")
         update_understanding("doctor", "route_count", str(len(routes)))
 
+        # Store known issues summary in memory
+        store_issues_in_memory(issues_registry)
+
     if report.status == HealthStatus.CRITICAL:
         print("")
-        print("RECOMMENDATION: Run 'python harness/doctor.py stabilize' to generate fix tasks.")
+        print("RECOMMENDATION: Run '/doctor stabilize' to generate fix tasks.")
 
     return 0 if report.status == HealthStatus.HEALTHY else 1
 
@@ -1770,7 +2429,7 @@ def cmd_stabilize() -> int:
     FEATURES_PATH.write_text(json.dumps(data, indent=2))
 
     print(f"\nStabilization tasks added to {FEATURES_PATH}")
-    print("Run 'python harness/coding/loop.py' to start fixing issues.")
+    print("Run '/loop' to start fixing issues.")
 
     return 0
 
@@ -1924,7 +2583,7 @@ def generate_manual_qa_plan(report: HealthReport, user_routes: list[dict]) -> No
         lines.append("")
 
     lines.append("---")
-    lines.append("After verification, run `python harness/doctor.py solidify` to generate baseline tests.")
+    lines.append("After verification, run `/doctor solidify` to generate baseline tests.")
 
     MANUAL_QA_PATH.write_text("\n".join(lines))
     print(f"\nGenerated Manual QA Plan: {MANUAL_QA_PATH}")
@@ -1979,7 +2638,7 @@ def cmd_qa(interactive: bool = True) -> int:
     print("  1. Open specs/manual_qa_plan.md")
     print("  2. Manually test each route")
     print("  3. Check [x] the boxes that work")
-    print("  4. Run: python harness/doctor.py solidify")
+    print("  4. Run: /doctor solidify")
 
     return 0
 
@@ -2031,7 +2690,7 @@ def cmd_solidify() -> int:
     if not verified_routes and not verified_services:
         print("No verified routes found in specs/manual_qa_plan.md")
         print("\nTo use this command:")
-        print("  1. Run: python harness/doctor.py qa")
+        print("  1. Run: /doctor qa")
         print("  2. Manually test each route")
         print("  3. Check [x] the boxes that work")
         print("  4. Run this command again")
@@ -2110,67 +2769,446 @@ Output ONLY the TypeScript code, no markdown code blocks or explanations."""
         return 1
 
 
+# =============================================================================
+# Guided Workflow Commands
+# =============================================================================
+
+def cmd_status() -> int:
+    """Show current doctor workflow progress."""
+    state = DoctorState.load()
+
+    print("\n" + "=" * 50)
+    print("  DOCTOR - Brownfield Stabilization Status")
+    print("=" * 50)
+
+    if state is None:
+        print("\nNo doctor state found.")
+        print("Run 'doctor' with no arguments to start the guided flow.")
+        return 0
+
+    print(f"\nStarted: {state.started_at[:19].replace('T', ' ')}")
+    print(f"Current Phase: {get_phase_display_name(state.current_phase)}")
+    print("\nProgress:")
+
+    for phase in PHASE_ORDER:
+        phase_data = state.phases.get(phase, DoctorPhase())
+        name = get_phase_display_name(phase)
+
+        if phase_data.completed:
+            if phase_data.skipped:
+                print(f"  ⊘ {name} - Skipped ({phase_data.skip_reason})")
+            else:
+                status_extra = ""
+                if phase == "assess" and phase_data.status:
+                    status_extra = f" ({phase_data.status})"
+                elif phase == "verify" and phase_data.routes_total > 0:
+                    status_extra = f" ({phase_data.routes_verified}/{phase_data.routes_total} routes)"
+                elif phase == "protect" and phase_data.tests_generated > 0:
+                    status_extra = f" ({phase_data.tests_generated} tests)"
+                elif phase == "fix" and phase_data.tasks_generated > 0:
+                    status_extra = f" ({phase_data.tasks_generated} tasks)"
+                print(f"  ✓ {name} - Complete{status_extra}")
+        elif state.current_phase == phase:
+            print(f"  → {name} - In Progress")
+        else:
+            print(f"  ○ {name} - Pending")
+
+    if state.is_complete():
+        print("\n✓ All phases complete! Project is ready for feature development.")
+    else:
+        print(f"\nNext: Run 'doctor next' to continue with {get_phase_display_name(state.current_phase)}")
+
+    return 0
+
+
+def cmd_reset() -> int:
+    """Reset doctor state and start over."""
+    if DOCTOR_STATE_PATH.exists():
+        DOCTOR_STATE_PATH.unlink()
+        print("Doctor state reset. Run 'doctor' to start fresh.")
+    else:
+        print("No doctor state to reset.")
+    return 0
+
+
+def _run_phase(phase: str, state: DoctorState) -> int:
+    """
+    Run a specific phase and update state.
+
+    Returns 0 on success, non-zero on failure.
+    """
+    phase_map = {
+        "assess": ("diagnose", cmd_diagnose),
+        "verify": ("qa", lambda: cmd_qa(interactive=True)),
+        "protect": ("solidify", cmd_solidify),
+        "coverage": ("baseline", cmd_baseline),
+        "fix": ("stabilize", cmd_stabilize),
+    }
+
+    if phase not in phase_map:
+        print(f"Unknown phase: {phase}")
+        return 1
+
+    cmd_name, cmd_func = phase_map[phase]
+    print(f"\n{'=' * 50}")
+    print(f"  PHASE: {get_phase_display_name(phase)}")
+    print("=" * 50 + "\n")
+
+    result = cmd_func()
+
+    if result == 0:
+        # Collect phase-specific metadata
+        kwargs = {}
+        if phase == "assess":
+            # Extract status from health report
+            if HEALTH_REPORT_PATH.exists():
+                content = HEALTH_REPORT_PATH.read_text()
+                if "## Status: HEALTHY" in content:
+                    kwargs["status"] = "HEALTHY"
+                elif "## Status: CRITICAL" in content:
+                    kwargs["status"] = "CRITICAL"
+                else:
+                    kwargs["status"] = "DRIFTING"
+        elif phase == "verify":
+            # Count verified routes from QA plan
+            if MANUAL_QA_PATH.exists():
+                content = MANUAL_QA_PATH.read_text()
+                total = content.count("- [ ]") + content.count("- [x]")
+                verified = content.count("- [x]")
+                kwargs["routes_total"] = total
+                kwargs["routes_verified"] = verified
+        elif phase == "protect":
+            # Count generated tests
+            baseline_ts = Path("tests/e2e/baseline_verified.spec.ts")
+            baseline_py = Path("tests/test_baseline_verified.py")
+            if baseline_ts.exists():
+                kwargs["tests_generated"] = baseline_ts.read_text().count("test(")
+            elif baseline_py.exists():
+                kwargs["tests_generated"] = baseline_py.read_text().count("def test_")
+        elif phase == "fix":
+            # Count generated tasks
+            if FEATURES_PATH.exists():
+                try:
+                    features = json.loads(FEATURES_PATH.read_text())
+                    kwargs["tasks_generated"] = len(features)
+                except json.JSONDecodeError:
+                    pass
+
+        state.mark_phase_complete(phase, **kwargs)
+        print(f"\n✓ {get_phase_display_name(phase)} complete.")
+
+    return result
+
+
+def cmd_next_phase() -> int:
+    """Run the next phase in sequence (non-interactive)."""
+    state = DoctorState.load()
+
+    if state is None:
+        print("No doctor state found. Starting fresh...")
+        state = DoctorState()
+        state.save()
+
+    if state.is_complete():
+        print("All phases complete! Project is ready for feature development.")
+        return 0
+
+    phase = state.current_phase
+
+    # Check if phase can be auto-skipped
+    can_skip, reason = can_skip_phase(phase, state)
+    if can_skip:
+        print(f"Auto-skipping {get_phase_display_name(phase)}: {reason}")
+        state.skip_phase(phase, reason)
+        # Recurse to next phase
+        return cmd_next_phase()
+
+    return _run_phase(phase, state)
+
+
+def cmd_guided_flow() -> int:
+    """
+    Interactive guided flow through all doctor phases.
+
+    Walks users through: assess -> verify -> protect -> coverage -> fix
+    """
+    print("\n" + "=" * 50)
+    print("  DOCTOR - Brownfield Stabilization")
+    print("=" * 50)
+
+    # Load or create state
+    state = DoctorState.load()
+    is_resume = state is not None
+
+    if state is None:
+        print("\nChecking project state...")
+
+        # Check for existing brownfield indicators
+        has_code = any(Path(".").glob("**/*.py")) or any(Path(".").glob("**/*.ts"))
+        has_health_report = HEALTH_REPORT_PATH.exists()
+        has_state = DOCTOR_STATE_PATH.exists()
+
+        if has_code:
+            print("  ✓ Existing codebase detected")
+        if has_health_report:
+            print("  ✓ Health report found")
+        else:
+            print("  ✗ No health report found")
+        if has_state:
+            print("  ✓ Doctor state found")
+        else:
+            print("  ✗ No doctor state found")
+
+        print("\nThis appears to be your first time running Doctor on this project.")
+        print("I'll guide you through the stabilization process.\n")
+
+        print("PHASES:")
+        for i, phase in enumerate(PHASE_ORDER, 1):
+            desc = {
+                "assess": "Full health audit",
+                "verify": "Manual QA of what works",
+                "protect": "Generate baseline tests",
+                "coverage": "Plan test strategy",
+                "fix": "Generate fix tasks",
+            }
+            print(f"  {i}. {phase.upper():10} - {desc[phase]}")
+
+        print("")
+        response = input("[Press Enter to start with ASSESS, or type a phase name to skip ahead, 'q' to quit]: ").strip().lower()
+
+        if response in ("q", "quit", "exit"):
+            print("Exiting without changes.")
+            return 0
+
+        state = DoctorState()
+
+        # Handle skip-to-phase
+        if response and response in PHASE_ORDER:
+            print(f"\nSkipping to {response.upper()}...")
+            for phase in PHASE_ORDER:
+                if phase == response:
+                    break
+                state.skip_phase(phase, "Skipped by user")
+        elif response:
+            print(f"Unknown phase '{response}', starting from ASSESS...")
+
+        state.save()
+
+    else:
+        # Resuming
+        print(f"\nResuming from saved state...")
+        print(f"Started: {state.started_at[:19].replace('T', ' ')}")
+        print("\nProgress:")
+
+        for phase in PHASE_ORDER:
+            phase_data = state.phases.get(phase, DoctorPhase())
+            name = get_phase_display_name(phase)
+
+            if phase_data.completed:
+                if phase_data.skipped:
+                    print(f"  ⊘ {name} - Skipped")
+                else:
+                    status_extra = ""
+                    if phase == "assess" and phase_data.status:
+                        status_extra = f" ({phase_data.status})"
+                    print(f"  ✓ {name} - Complete{status_extra}")
+            elif state.current_phase == phase:
+                print(f"  → {name} - In Progress")
+            else:
+                print(f"  ○ {name} - Pending")
+
+        print("")
+
+    # Main loop
+    while not state.is_complete():
+        phase = state.current_phase
+
+        # Check if phase can be auto-skipped
+        can_skip, skip_reason = can_skip_phase(phase, state)
+
+        if can_skip:
+            print(f"\n{get_phase_display_name(phase)} can be skipped: {skip_reason}")
+            response = input(f"Skip this phase? [Y/n]: ").strip().lower()
+            if response != "n":
+                state.skip_phase(phase, skip_reason)
+                print(f"Skipped {get_phase_display_name(phase)}.")
+                continue
+
+        # Prompt for this phase
+        print(f"\nReady for {get_phase_display_name(phase)}?")
+        response = input("[Enter=continue, 'skip'=skip phase, 'q'=save & quit]: ").strip().lower()
+
+        if response in ("q", "quit", "exit"):
+            print("\nProgress saved. Run 'doctor' to resume.")
+            return 0
+
+        if response == "skip":
+            # Ask for confirmation on skip
+            print(f"\nSkipping {get_phase_display_name(phase)}...")
+            if not can_skip:
+                print(f"  Warning: {skip_reason}")
+                confirm = input("Are you sure? [y/N]: ").strip().lower()
+                if confirm != "y":
+                    continue
+            state.skip_phase(phase, "Skipped by user")
+            continue
+
+        # Run the phase
+        result = _run_phase(phase, state)
+
+        if result != 0:
+            print(f"\nPhase failed with exit code {result}.")
+            response = input("Retry? [Y/n/skip/quit]: ").strip().lower()
+            if response == "n":
+                print("Phase left incomplete. Run 'doctor' to resume.")
+                return result
+            elif response == "skip":
+                state.skip_phase(phase, "Skipped after failure")
+            elif response in ("q", "quit"):
+                print("Progress saved. Run 'doctor' to resume.")
+                return result
+            # else: loop will retry
+
+    # All done!
+    print("\n" + "=" * 50)
+    print("  ✓ ALL PHASES COMPLETE")
+    print("=" * 50)
+    print("""
+Project stabilization complete!
+
+Summary:
+  - Health audit performed
+  - Working features verified
+  - Baseline tests protect known-good functionality
+  - Test strategy documented
+  - Stabilization tasks queued
+
+Next steps:
+  1. Review specs/features.json for queued fix tasks
+  2. Run '/loop' to execute fixes
+  3. Once stable, run '/architect' for new features
+""")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Brownfield Doctor - Phase 0 Health Audit System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python harness/doctor.py              # Auto-detect and recommend action
-  python harness/doctor.py diagnose     # Full health audit
-  python harness/doctor.py stabilize    # Generate fix tasks
-  python harness/doctor.py baseline     # Generate test strategy
-  python harness/doctor.py fixtures     # Scaffold webhook fixtures
-  python harness/doctor.py qa           # Generate manual QA checklist (interactive)
-  python harness/doctor.py solidify     # Generate baseline tests from verified QA
+  /doctor                # Interactive guided flow (in harness shell)
+  /doctor status         # Show current progress
+  /doctor next           # Run next phase (non-interactive)
+  /doctor reset          # Reset and start over
+  /doctor diagnose       # Full health audit (Phase 1)
+  /doctor qa             # Manual QA checklist (Phase 2)
+  /doctor solidify       # Generate baseline tests (Phase 3)
+  /doctor baseline       # Test strategy (Phase 4)
+  /doctor stabilize      # Generate fix tasks (Phase 5)
+
+Direct invocation (outside shell):
+  python harness/doctor.py fixtures     # Scaffold webhook fixtures (utility)
+  python harness/doctor.py issues       # Scan known issues (utility)
         """
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    subparsers.add_parser("diagnose", help="Run full health audit")
-    subparsers.add_parser("stabilize", help="Generate stabilization tasks")
-    subparsers.add_parser("baseline", help="Generate test strategy recommendations")
-    subparsers.add_parser("fixtures", help="Scaffold webhook fixture structure")
+    # Guided flow commands
+    subparsers.add_parser("status", help="Show current phase and progress")
+    subparsers.add_parser("next", help="Run the next phase in sequence")
+    subparsers.add_parser("reset", help="Reset doctor state and start over")
 
-    qa_parser = subparsers.add_parser("qa", help="Generate manual QA verification checklist")
+    # Phase commands (still work standalone)
+    subparsers.add_parser("diagnose", help="Run full health audit (Phase 1: ASSESS)")
+    subparsers.add_parser("stabilize", help="Generate stabilization tasks (Phase 5: FIX)")
+    subparsers.add_parser("baseline", help="Generate test strategy recommendations (Phase 4: COVERAGE)")
+    subparsers.add_parser("fixtures", help="Scaffold webhook fixture structure (utility)")
+
+    qa_parser = subparsers.add_parser("qa", help="Generate manual QA verification checklist (Phase 2: VERIFY)")
     qa_parser.add_argument(
         "-y", "--no-interactive",
         action="store_true",
         help="Skip interactive prompts, use auto-detection only"
     )
 
-    subparsers.add_parser("solidify", help="Generate baseline tests from verified QA results")
+    subparsers.add_parser("solidify", help="Generate baseline tests from verified QA (Phase 3: PROTECT)")
+    subparsers.add_parser("issues", help="Scan and register known issues from docs and code (utility)")
 
     args = parser.parse_args()
 
-    if args.command == "diagnose":
-        return cmd_diagnose()
+    # Guided flow commands
+    if args.command == "status":
+        return cmd_status()
+    elif args.command == "next":
+        return cmd_next_phase()
+    elif args.command == "reset":
+        return cmd_reset()
+
+    # Phase commands (standalone, also update state)
+    elif args.command == "diagnose":
+        result = cmd_diagnose()
+        if result == 0:
+            _update_state_from_standalone("assess")
+        return result
     elif args.command == "stabilize":
-        return cmd_stabilize()
+        result = cmd_stabilize()
+        if result == 0:
+            _update_state_from_standalone("fix")
+        return result
     elif args.command == "baseline":
-        return cmd_baseline()
+        result = cmd_baseline()
+        if result == 0:
+            _update_state_from_standalone("coverage")
+        return result
     elif args.command == "fixtures":
         return cmd_fixtures()
     elif args.command == "qa":
         interactive = not getattr(args, "no_interactive", False)
-        return cmd_qa(interactive=interactive)
-    elif args.command == "solidify":
-        return cmd_solidify()
-    else:
-        # Default: run diagnose and recommend action
-        result = cmd_diagnose()
-
-        # If critical, prompt for stabilization
-        if HEALTH_REPORT_PATH.exists():
-            content = HEALTH_REPORT_PATH.read_text()
-            if "CRITICAL" in content:
-                print("")
-                response = input("Project is critical. Generate stabilization tasks? [Y/n]: ").strip().lower()
-                if response != "n":
-                    return cmd_stabilize()
-
+        result = cmd_qa(interactive=interactive)
+        if result == 0:
+            _update_state_from_standalone("verify")
         return result
+    elif args.command == "solidify":
+        result = cmd_solidify()
+        if result == 0:
+            _update_state_from_standalone("protect")
+        return result
+    elif args.command == "issues":
+        return cmd_issues()
+    else:
+        # Default: interactive guided flow
+        return cmd_guided_flow()
+
+
+def _update_state_from_standalone(phase: str) -> None:
+    """Update doctor state when a phase command is run standalone."""
+    state = DoctorState.load()
+    if state is None:
+        state = DoctorState()
+
+    # Only update if this phase is current or earlier
+    try:
+        current_idx = PHASE_ORDER.index(state.current_phase) if state.current_phase in PHASE_ORDER else -1
+        phase_idx = PHASE_ORDER.index(phase)
+
+        if phase_idx <= current_idx or state.current_phase == "complete":
+            # Phase already done or we're past it - just mark complete without advancing
+            if not state.phases[phase].completed:
+                state.phases[phase].completed = True
+                state.phases[phase].completed_at = datetime.now(timezone.utc).isoformat()
+                state.save()
+        else:
+            # This is a future phase - skip to it and mark complete
+            for skip_phase in PHASE_ORDER[current_idx:phase_idx]:
+                if not state.phases[skip_phase].completed:
+                    state.skip_phase(skip_phase, "Skipped - ran later phase directly")
+            state.mark_phase_complete(phase)
+    except ValueError:
+        # Phase not in order (e.g., complete) - just save
+        pass
 
 
 if __name__ == "__main__":
